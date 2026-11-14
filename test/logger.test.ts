@@ -52,20 +52,56 @@ describe('logging calls', () => {
     ])
   })
 
-  test('the level filter applies; isLevelEnabled reports it', async () => {
+  test('the level filter applies (aliases included); isLevelEnabled reports it', async () => {
     const t = memoryTransport()
     const log = createPipelineLogger({ transport: t, level: 'warn' })
     log.trace('t')
     log.debug('d')
     log.info('i')
+    log.notice('n')
     log.warn('w')
+    log.warning('w2')
     log.error('e')
     log.fatal('f')
+    log.critical('c')
+    log.alert('a')
+    log.emergency('em')
+    log.log('notice', 'by-name low')
+    log.log('ERROR' as 'error', 'by-name high')
+    log.log('loud' as 'info', 'unknown level')
     await log.flush()
-    expect(t.records().map((r) => r.level)).toEqual(['warn', 'error', 'fatal'])
-    expect(log.level).toBe('warn')
+    expect(t.records().map((r) => [r.level, r.msg])).toEqual([
+      ['warning', 'w'],
+      ['warning', 'w2'],
+      ['error', 'e'],
+      ['critical', 'f'],
+      ['critical', 'c'],
+      ['alert', 'a'],
+      ['emergency', 'em'],
+      ['error', 'by-name high'],
+      ['error', 'unknown level'],
+    ])
+    expect(t.records().at(-1)?.fields).toEqual({ invalidLevel: 'loud' })
+    expect(log.level).toBe('warning')
     expect(log.isLevelEnabled('info')).toBe(false)
+    expect(log.isLevelEnabled('notice')).toBe(false)
+    expect(log.isLevelEnabled('warn')).toBe(true)
     expect(log.isLevelEnabled('error')).toBe(true)
+    expect(log.isLevelEnabled('nope' as 'info')).toBe(false)
+    expect(() => createPipelineLogger({ transport: t, level: 'loud' as 'info' })).toThrow(TypeError)
+  })
+
+  test('the line format and a custom formatter', async () => {
+    const t = memoryTransport()
+    const log = createPipelineLogger({ transport: t, format: 'line', env: 'local', now: () => T0 })
+    log.error('Payment failed', { invoice: 42 })
+    await log.flush()
+    expect(t.text()).toBe('[2026-11-14 10:00:00.000] local.ERROR: Payment failed {"invoice":42}\n')
+    const c = memoryTransport()
+    const custom = createPipelineLogger({ transport: c, format: (r) => `${String(r.msg)}\n` })
+    custom.info('plain')
+    await custom.flush()
+    expect(c.text()).toBe('plain\n')
   })
 
   test('a log call never throws, whatever it is given', async () => {
@@ -141,6 +177,7 @@ describe('fail-safe', () => {
       .lines()
       .filter((l) => String(l.msg).includes('failed; writing to stderr'))
     expect(warnings).toHaveLength(1)
+    expect(warnings[0]?.level).toBe('warning')
     expect(warnings[0]?.fields).toEqual({
       error: { name: 'Error', message: 'ENOSPC: no space left on device', code: 'ENOSPC' },
     })
@@ -211,7 +248,7 @@ describe('fail-safe', () => {
     const d = join(dir(), 'nested', 'logs')
     let now = T0
     const log = createPipelineLogger({
-      transport: fileTransport({ dir: d, retentionDays: 0 }),
+      transport: fileTransport({ dir: d, days: 0 }),
       now: () => now,
     })
     log.info('day one')
@@ -219,7 +256,7 @@ describe('fail-safe', () => {
     await log.close()
     rmSync(d, { recursive: true, force: true })
     const log2 = createPipelineLogger({
-      transport: fileTransport({ dir: d, retentionDays: 0 }),
+      transport: fileTransport({ dir: d, days: 0 }),
       now: () => now,
     })
     now += 86_400_000
@@ -292,7 +329,7 @@ describe('file transport', () => {
     const d = dir()
     let now = Date.parse('2026-11-14T23:59:59.900Z')
     const log = createPipelineLogger({
-      transport: fileTransport({ dir: d, retentionDays: 0 }),
+      transport: fileTransport({ dir: d, days: 0 }),
       now: () => now,
     })
     log.info('before midnight')
@@ -300,16 +337,34 @@ describe('file transport', () => {
     log.info('after midnight')
     await log.close()
     expect(readLogDir(d).map((f) => [f.file, f.records.map((r) => r.msg)])).toEqual([
-      ['2026-11-14.ndjson', ['before midnight']],
-      ['2026-11-15.ndjson', ['after midnight']],
+      ['strutvane-2026-11-14.log', ['before midnight']],
+      ['strutvane-2026-11-15.log', ['after midnight']],
     ])
+  })
+
+  test('single files ignore the day; parts still start at -2', async () => {
+    const d = dir()
+    let now = Date.parse('2026-11-14T23:59:59.900Z')
+    const log = createPipelineLogger({
+      transport: fileTransport({ dir: d, mode: 'single', base: 'app', maxFileBytes: 2048 }),
+      maxBatchBytes: 512,
+      now: () => now,
+    })
+    log.info('before midnight')
+    now += 200
+    for (let i = 0; i < 40; i++) log.info('after midnight', { i, pad: 'x'.repeat(40) })
+    await log.close()
+    const files = readLogDir(d)
+    expect(files[0]?.file).toBe('app.log')
+    expect(files[1]?.file).toBe('app-2.log')
+    expect(files.flatMap((f) => f.records).length).toBe(41)
   })
 
   test('size rotation: exactly once per overflow, no file over the cap, no torn line', async () => {
     const d = dir()
     const cap = 16 * 1024
     const log = createPipelineLogger({
-      transport: fileTransport({ dir: d, maxFileBytes: cap, retentionDays: 0 }),
+      transport: fileTransport({ dir: d, maxFileBytes: cap, days: 0 }),
       maxBatchBytes: 2 * 1024,
       now: () => T0,
     })
@@ -321,28 +376,56 @@ describe('file transport', () => {
     const seq = files.flatMap((f) => f.records.map((r) => (r.fields as { i: number }).i))
     expect(seq).toEqual([...Array(2_000).keys()]) // order kept, nothing duplicated or lost
     expect(files.map((f) => f.file)).toEqual(
-      files.map((_, i) => (i === 0 ? '2026-11-14.ndjson' : `2026-11-14-${i}.ndjson`)),
+      files.map((_, i) =>
+        i === 0 ? 'strutvane-2026-11-14.log' : `strutvane-2026-11-14-${i + 1}.log`,
+      ),
     )
   })
 
-  test('a restart resumes the newest part that still has room', async () => {
+  test('a restart resumes the newest part if it has room, else the next one (never renames)', async () => {
     const d = dir()
-    writeFileSync(join(d, '2026-11-14.ndjson'), `${'{"msg":"old"}\n'.repeat(100)}`)
-    const t = fileTransport({ dir: d, maxFileBytes: 1_000, retentionDays: 0 })
-    await t.write({ text: '{"msg":"new"}\n', bytes: 14, records: 1, dayKey: '2026-11-14' })
-    expect(t.currentFile()).toBe(join(d, '2026-11-14-1.ndjson'))
+    const day = { records: 1, dayKey: '2026-11-14' }
+    writeFileSync(join(d, 'strutvane-2026-11-14.log'), `${'{"msg":"old"}\n'.repeat(100)}`)
+    const t = fileTransport({ dir: d, maxFileBytes: 1_000, days: 0 })
+    await t.write({ text: '{"msg":"new"}\n', bytes: 14, ...day })
+    expect(t.currentFile()).toBe(join(d, 'strutvane-2026-11-14-2.log'))
     await t.close()
     await t.close() // idempotent
+    // Part 3 exists with room: continue it, not part 2 (and not the full first file).
+    writeFileSync(join(d, 'strutvane-2026-11-14-3.log'), '{"msg":"p3"}\n')
+    const again = fileTransport({ dir: d, maxFileBytes: 1_000, days: 0 })
+    await again.write({ text: '{"msg":"later"}\n', bytes: 16, ...day })
+    expect(again.currentFile()).toBe(join(d, 'strutvane-2026-11-14-3.log'))
+    await again.close()
+    expect(readFileSync(join(d, 'strutvane-2026-11-14-3.log'), 'utf8')).toBe(
+      '{"msg":"p3"}\n{"msg":"later"}\n',
+    )
   })
 
-  test('retention runs at each new day; foreign files are untouched', async () => {
+  test('retention runs at each new day, for its own base only; foreign files are untouched', async () => {
     const d = dir()
-    writeFileSync(join(d, '2026-01-01.ndjson'), 'x\n')
+    writeFileSync(join(d, 'strutvane-2026-01-01.log'), 'x\n')
+    writeFileSync(join(d, 'payments-2026-01-01.log'), 'x\n')
     writeFileSync(join(d, 'notes.txt'), 'keep')
-    const t = fileTransport({ dir: d, retentionDays: 30, now: () => T0 })
+    const t = fileTransport({ dir: d, days: 30, now: () => T0 })
     await t.write({ text: '{}\n', bytes: 3, records: 1, dayKey: '2026-11-14' })
     await t.close()
-    expect(readdirSync(d).sort()).toEqual(['2026-11-14.ndjson', 'notes.txt'])
+    expect(readdirSync(d).sort()).toEqual(
+      ['notes.txt', 'payments-2026-01-01.log', 'strutvane-2026-11-14.log'].sort(),
+    )
+  })
+
+  test('per-process files: the worker id is part of every name', async () => {
+    const d = dir()
+    const t = fileTransport({ dir: d, worker: '7', maxFileBytes: 1024 })
+    const b = { records: 1, dayKey: '2026-11-14' }
+    await t.write({ text: `${'a'.repeat(1000)}\n`, bytes: 1001, ...b })
+    await t.write({ text: `${'b'.repeat(100)}\n`, bytes: 101, ...b })
+    await t.close()
+    expect(readdirSync(d).sort()).toEqual([
+      'strutvane-2026-11-14.worker-7-2.log',
+      'strutvane-2026-11-14.worker-7.log',
+    ])
   })
 
   test('a failed write forces a reopen; invalid tags are rejected', async () => {
@@ -350,7 +433,7 @@ describe('file transport', () => {
     let calls = 0
     const t = fileTransport({
       dir: d,
-      retentionDays: 0,
+      days: 0,
       writer: async (path) => {
         const inner = await appendFileWriter(path)
         return {
@@ -367,8 +450,9 @@ describe('file transport', () => {
     await expect(t.write(b)).rejects.toThrow('EIO')
     await t.write(b)
     await t.close()
-    expect(readFileSync(join(d, '2026-11-14.ndjson'), 'utf8')).toBe(b.text)
-    expect(() => fileTransport({ dir: d, tag: '../x' })).toThrow(RangeError)
+    expect(readFileSync(join(d, 'strutvane-2026-11-14.log'), 'utf8')).toBe(b.text)
+    expect(() => fileTransport({ dir: d, worker: '../x' })).toThrow(RangeError)
+    expect(() => fileTransport({ dir: d, base: 'my-app' })).toThrow(RangeError)
     expect(today(() => T0)).toBe('2026-11-14')
     expect(typeof today()).toBe('string')
   })

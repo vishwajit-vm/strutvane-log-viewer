@@ -6,7 +6,9 @@
  * ```
  *
  * - Correlation ids come from the request context.
- * - `fields` merges, in order: child bindings → extra context keys → call-site fields. Later wins.
+ * - `fields` merges, in order: base context (`Log.shareContext`, process-wide `Log.withContext`) →
+ *   child bindings → extra request-context keys → call-site fields. Later wins, so the most
+ *   specific value is the one written.
  * - An `Error` passed as `fields.err` or `fields.error` is moved to `err`, so the viewer and tools
  *   find errors in one place.
  *
@@ -14,8 +16,9 @@
  *
  * @module
  */
-import type { LogFields, LogLevel } from '@strutvane/contracts'
+import type { LogFields } from '@strutvane/contracts'
 import type { LogContext } from './context.ts'
+import type { Level } from './levels.ts'
 
 const CORRELATION_KEYS = ['requestId', 'traceId', 'tenantId', 'actorId'] as const
 
@@ -25,7 +28,7 @@ type MutableFields = Record<string, unknown> & { fieldsError?: string }
 /** The unsanitised record. Declared keys keep property access type-safe. */
 export interface RawRecord {
   time: string
-  level: LogLevel
+  level: Level
   msg: string
   requestId?: string
   traceId?: string
@@ -70,14 +73,16 @@ export function toMessage(value: unknown): string {
  * Build an unsanitised record.
  *
  * @param timeMs record timestamp in epoch milliseconds (from the logger's clock)
+ * @param base context shared by every channel (lowest precedence), if any
  */
 export function buildRecord(
-  level: LogLevel,
+  level: Level,
   msg: unknown,
   bindings: LogFields,
   context: LogContext | undefined,
   fields: LogFields | undefined,
   timeMs: number,
+  base?: LogFields,
 ): RawRecord {
   const record: RawRecord = {
     time: new Date(timeMs).toISOString(),
@@ -85,6 +90,7 @@ export function buildRecord(
     msg: toMessage(msg),
   }
   const merged: MutableFields = {}
+  assignSafely(merged, base)
   assignSafely(merged, bindings)
   if (context) {
     for (const key of CORRELATION_KEYS) {

@@ -4,8 +4,8 @@
  * Guarantees:
  * - **Bounded:** never holds more than `maxRecords` items or `maxBytes` bytes.
  * - **Priority when full:**
- *   - an incoming low-severity record (trace/debug/info) is dropped
- *   - an incoming important record (warn and up) evicts the oldest low record
+ *   - an incoming low-priority record (debug, info, notice) is dropped
+ *   - an incoming important record (warning and up) evicts the oldest low record
  *   - only when the queue holds nothing but important records is the oldest important record
  *     evicted, so the queue stays bounded no matter what
  * - **Counted drops:** drops are counted per level, so the logger can report them later.
@@ -14,16 +14,16 @@
  *
  * @module
  */
-import type { LogLevel } from '@strutvane/contracts'
-import { IMPORTANT_SEVERITY } from './levels.ts'
+import { IMPORTANT_PRIORITY, type Level } from './levels.ts'
 
 /** One serialised record waiting to be written. */
 export interface QueueItem {
   readonly seq: number
   readonly line: string
   readonly bytes: number
-  readonly severity: number
-  readonly level: LogLevel
+  /** Level priority (see `LEVEL_PRIORITY`); decides what is dropped first when the queue is full. */
+  readonly priority: number
+  readonly level: Level
   /** UTC day of the record (`YYYY-MM-DD`). A batch never mixes days, which keeps rotation correct. */
   readonly dayKey: string
 }
@@ -78,7 +78,7 @@ export class BoundedQueue {
   private readonly low = new Fifo()
   private readonly high = new Fifo()
   private bytes = 0
-  private dropped: Partial<Record<LogLevel, number>> = {}
+  private dropped: Partial<Record<Level, number>> = {}
   private readonly limits: QueueLimits
   /** Highest record count seen (for stats and tests). */
   peakRecords = 0
@@ -103,7 +103,7 @@ export class BoundedQueue {
 
   /** Add an item, dropping or evicting according to the priority rules. */
   push(item: QueueItem): PushResult {
-    const important = item.severity >= IMPORTANT_SEVERITY
+    const important = item.priority >= IMPORTANT_PRIORITY
     let result: PushResult = 'queued'
     while (this.size >= this.limits.maxRecords || this.bytes + item.bytes > this.limits.maxBytes) {
       if (this.size === 0 || !important) {
@@ -150,14 +150,14 @@ export class BoundedQueue {
   }
 
   /** Drop counts per level since the last call, then reset them. `undefined` if nothing dropped. */
-  takeDropped(): Partial<Record<LogLevel, number>> | undefined {
+  takeDropped(): Partial<Record<Level, number>> | undefined {
     const d = this.dropped
     if (Object.keys(d).length === 0) return undefined
     this.dropped = {}
     return d
   }
 
-  private count(level: LogLevel): void {
+  private count(level: Level): void {
     this.dropped[level] = (this.dropped[level] ?? 0) + 1
   }
 }

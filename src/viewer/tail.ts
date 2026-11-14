@@ -2,7 +2,10 @@
  * Live tail over Server-Sent Events: poll the log directory and stream newly appended records.
  *
  * - **Starts at the end** of the existing files: only new records are sent.
- * - **Follows rotation:** a new size part or a new day's file is picked up from its first byte.
+ * - **Reads both formats** (`line` and `json`) through `parseLogLine`.
+ * - **Follows rotation:** a new size part, a new day's file or a new process's file is picked up
+ *   from its first byte. Files that existed at the start (including `single` files, which have no
+ *   day in their name) are followed from their size at that moment.
  *   A file that shrinks (cleared and recreated) is re-read from the start.
  * - **Never sends torn lines:** bytes after the last newline are held back until completed.
  * - **Bounded:** at most `maxReadBytes` per file per poll; the rest comes on the next poll.
@@ -20,7 +23,6 @@
  * @module
  */
 import { join } from 'node:path'
-import { dayKeyOf } from '../files.ts'
 import type { Sanitizer } from '../redact.ts'
 import type { RecordFilter, RecordQuery } from './filters.ts'
 import { accept, cleanLine, describeFiles, readRange, viewerSanitizer } from './store.ts'
@@ -28,6 +30,8 @@ import { accept, cleanLine, describeFiles, readRange, viewerSanitizer } from './
 /** Options for {@link createTailStream}. */
 export interface TailOptions {
   readonly dir: string
+  /** File base names to follow. Default: `strutvane`. */
+  readonly bases?: ReadonlySet<string>
   readonly query: RecordQuery
   readonly scope?: RecordFilter | undefined
   /** How often to check for new bytes. Default: 1,000 ms. */
@@ -46,7 +50,6 @@ export interface TailOptions {
   /** End the stream after this long, whatever happens. Default: 1 hour. */
   readonly maxDurationMs?: number
   readonly signal?: AbortSignal
-  readonly now?: () => number
   readonly sanitize?: Sanitizer
   /** Called exactly once when the stream ends for any reason. */
   readonly onClose?: () => void
@@ -65,10 +68,8 @@ export function createTailStream(options: TailOptions): ReadableStream<Uint8Arra
   const stallBeats = options.stallBeats ?? 3
   const maxQueued = options.maxQueuedBytes ?? 1024 * 1024
   const maxDurationMs = options.maxDurationMs ?? 60 * 60 * 1000
-  const now = options.now ?? Date.now
   const sanitize = options.sanitize ?? viewerSanitizer
   const encoder = new TextEncoder()
-  const startDay = dayKeyOf(now())
   const followed = new Map<string, Followed>()
   let pollTimer: NodeJS.Timeout | undefined
   let heartbeatTimer: NodeJS.Timeout | undefined
@@ -125,10 +126,8 @@ export function createTailStream(options: TailOptions): ReadableStream<Uint8Arra
 
         try {
           // Start at the end of what already exists.
-          for (const file of await describeFiles(options.dir)) {
-            if (file.day >= startDay)
-              followed.set(file.name, { offset: file.size, pending: Buffer.alloc(0) })
-          }
+          for (const file of await describeFiles(options.dir, options.bases))
+            followed.set(file.name, { offset: file.size, pending: Buffer.alloc(0) })
         } catch {
           end()
           return
@@ -139,9 +138,7 @@ export function createTailStream(options: TailOptions): ReadableStream<Uint8Arra
         const poll = async (): Promise<void> => {
           if (closed) return
           try {
-            const files = (await describeFiles(options.dir))
-              .filter((f) => f.day >= startDay)
-              .reverse()
+            const files = (await describeFiles(options.dir, options.bases)).reverse()
             for (const file of files) {
               let state = followed.get(file.name)
               if (!state || file.size < state.offset) {

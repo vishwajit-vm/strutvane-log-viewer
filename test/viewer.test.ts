@@ -53,7 +53,7 @@ function fixture(): string {
   const t = tempDir()
   cleanups.push(t.cleanup)
   writeFileSync(
-    join(t.dir, '2026-11-13.ndjson'),
+    join(t.dir, 'strutvane-2026-11-13.log'),
     line({ time: '2026-11-13T09:00:00.000Z', msg: 'yesterday', tenantId: 'acme' }) +
       line({
         time: '2026-11-13T09:30:00.000Z',
@@ -63,7 +63,7 @@ function fixture(): string {
       }),
   )
   writeFileSync(
-    join(t.dir, '2026-11-14.ndjson'),
+    join(t.dir, 'strutvane-2026-11-14.log'),
     line({
       time: '2026-11-14T10:00:00.000Z',
       msg: 'GET /invoices 200',
@@ -358,7 +358,10 @@ describe('reading records', () => {
     )) as {
       files: Array<{ name: string; day: string; size: number }>
     }
-    expect(files.map((f) => f.name)).toEqual(['2026-11-14.ndjson', '2026-11-13.ndjson'])
+    expect(files.map((f) => f.name)).toEqual([
+      'strutvane-2026-11-14.log',
+      'strutvane-2026-11-13.log',
+    ])
     expect(files[0]?.size).toBeGreaterThan(0)
   })
 
@@ -458,7 +461,7 @@ describe('reading records', () => {
       dir,
       query: {},
       limit: 100,
-      cursor: { file: '2026-11-14.w9.ndjson', before: 3 },
+      cursor: { file: 'strutvane-2026-11-14.worker-9.log', before: 3 },
     })
     expect(page.records.map((r) => r.msg)).toEqual([
       'foreign',
@@ -471,17 +474,17 @@ describe('reading records', () => {
   })
 
   test('cursors are validated: traversal, wrong shapes and oversized values are rejected', () => {
-    expect(decodeCursor(encodeCursor({ file: '2026-11-14.ndjson', before: 3 }))).toEqual({
-      file: '2026-11-14.ndjson',
+    expect(decodeCursor(encodeCursor({ file: 'strutvane-2026-11-14.log', before: 3 }))).toEqual({
+      file: 'strutvane-2026-11-14.log',
       before: 3,
     })
     const enc = (v: unknown): string => Buffer.from(JSON.stringify(v)).toString('base64url')
     for (const bad of [
       enc(['../../etc/passwd', 1]),
-      enc(['2026-11-14.ndjson', -1]),
-      enc(['2026-11-14.ndjson', 1.5]),
+      enc(['strutvane-2026-11-14.log', -1]),
+      enc(['strutvane-2026-11-14.log', 1.5]),
       enc({ file: 'x' }),
-      enc(['2026-11-14.ndjson']),
+      enc(['strutvane-2026-11-14.log']),
       'x'.repeat(600),
       '!!',
       Buffer.from('not json').toString('base64url'),
@@ -555,7 +558,7 @@ describe('download', () => {
     const t = tempDir()
     cleanups.push(t.cleanup)
     writeFileSync(
-      join(t.dir, '2026-11-14.ndjson'),
+      join(t.dir, 'strutvane-2026-11-14.log'),
       line({ msg: '=HYPERLINK("http://evil","x")' }) + line({ msg: 'a,"b"' }),
     )
     const res = await viewer(t.dir).fetch(
@@ -587,7 +590,7 @@ describe('download', () => {
     const t = tempDir()
     cleanups.push(t.cleanup)
     writeFileSync(
-      join(t.dir, '2026-11-14.ndjson'),
+      join(t.dir, 'strutvane-2026-11-14.log'),
       Array.from({ length: 2_000 }, (_, i) => line({ i, pad: 'p'.repeat(100) })).join(''),
     )
     const res = await viewer(t.dir).fetch(new Request(`${BASE}/api/download?day=2026-11-14`))
@@ -638,26 +641,30 @@ describe('clear', () => {
       },
     )
     expect(res.status).toBe(200)
-    expect((await body(res)).deleted).toEqual(['2026-11-13.ndjson'])
-    expect(readdirSync(dir).sort()).toEqual(['2026-11-14.ndjson', 'secrets.env'])
-    expect(events[0]).toMatchObject({ action: 'clear', deleted: ['2026-11-13.ndjson'], ip: '::1' })
+    expect((await body(res)).deleted).toEqual(['strutvane-2026-11-13.log'])
+    expect(readdirSync(dir).sort()).toEqual(['secrets.env', 'strutvane-2026-11-14.log'])
+    expect(events[0]).toMatchObject({
+      action: 'clear',
+      deleted: ['strutvane-2026-11-13.log'],
+      ip: '::1',
+    })
   })
 
   test('`before` is honoured but capped at today', async () => {
     const dir = fixture()
-    writeFileSync(join(dir, '2026-11-01.ndjson'), line({}))
-    mkdirSync(join(dir, '2026-11-02.ndjson')) // undeletable: skipped
+    writeFileSync(join(dir, 'strutvane-2026-11-01.log'), line({}))
+    mkdirSync(join(dir, 'strutvane-2026-11-02.log')) // undeletable: skipped
     const v = viewer(dir)
     const token = await csrf(v)
     const first = await body(
       await v.fetch(post({ 'x-csrf-token': token }, { confirm: 'DELETE', before: '2026-11-05' })),
     )
-    expect(first.deleted).toEqual(['2026-11-01.ndjson'])
+    expect(first.deleted).toEqual(['strutvane-2026-11-01.log'])
     const second = await body(
       await v.fetch(post({ 'x-csrf-token': token }, { confirm: 'DELETE', before: '2099-01-01' })),
     )
-    expect(second.deleted).toEqual(['2026-11-13.ndjson'])
-    expect(existsSync(join(dir, '2026-11-14.ndjson'))).toBe(true)
+    expect(second.deleted).toEqual(['strutvane-2026-11-13.log'])
+    expect(existsSync(join(dir, 'strutvane-2026-11-14.log'))).toBe(true)
   })
 
   test('CSRF: missing or wrong token, cross-origin and cross-site requests are refused', async () => {
@@ -672,7 +679,7 @@ describe('clear', () => {
     ]
     for (const [headers, status] of cases)
       expect((await v.fetch(post(headers))).status).toBe(status)
-    expect(readdirSync(dir)).toContain('2026-11-13.ndjson') // nothing was deleted
+    expect(readdirSync(dir)).toContain('strutvane-2026-11-13.log') // nothing was deleted
     // A different viewer instance has a different CSRF token.
     expect((await viewer(dir).fetch(post({ 'x-csrf-token': token }))).status).toBe(403)
   })
@@ -728,10 +735,16 @@ describe('live tail', () => {
     const decoder = new TextDecoder()
     let text = ''
     const deadline = Date.now() + 5_000
+    // Keep one read outstanding across timeouts: racing a fresh read() each time would drop the
+    // chunk that an abandoned read later resolves with.
+    let pending: Promise<ReadableStreamReadResult<Uint8Array>> | undefined
     while (!until(text) && Date.now() < deadline) {
-      const r = await Promise.race([reader.read(), sleep(100).then(() => undefined)])
-      if (r?.done) break
-      if (r?.value) text += decoder.decode(r.value)
+      pending ??= reader.read()
+      const r = await Promise.race([pending, sleep(100).then(() => undefined)])
+      if (r === undefined) continue
+      pending = undefined
+      if (r.done) break
+      text += decoder.decode(r.value)
     }
     await reader.cancel()
     return text
@@ -740,7 +753,7 @@ describe('live tail', () => {
   test('streams only new, complete, filtered records; follows rotation; never sends torn lines', async () => {
     const t = tempDir()
     cleanups.push(t.cleanup)
-    const file = join(t.dir, '2026-11-14.ndjson')
+    const file = join(t.dir, 'strutvane-2026-11-14.log')
     writeFileSync(file, line({ msg: 'already there' }))
     let closed = 0
     const stream = createTailStream({
@@ -748,7 +761,6 @@ describe('live tail', () => {
       query: { levels: new Set(['info']) },
       pollMs: 20,
       heartbeatMs: 30,
-      now: () => NOW,
       onClose: () => closed++,
     })
     const done = readEvents(stream, (text) => text.includes('rotated') && text.includes(': ping'))
@@ -763,7 +775,7 @@ describe('live tail', () => {
     await sleep(60)
     appendFileSync(file, ' done"}\n')
     await sleep(60)
-    writeFileSync(join(t.dir, '2026-11-14-1.ndjson'), line({ msg: 'rotated' }))
+    writeFileSync(join(t.dir, 'strutvane-2026-11-14-2.log'), line({ msg: 'rotated' }))
     const text = await done
     expect(text).toContain(': connected')
     expect(text).not.toContain('already there')
@@ -779,9 +791,9 @@ describe('live tail', () => {
   test('a truncated (cleared and recreated) file is re-read from the start', async () => {
     const t = tempDir()
     cleanups.push(t.cleanup)
-    const file = join(t.dir, '2026-11-14.ndjson')
+    const file = join(t.dir, 'strutvane-2026-11-14.log')
     writeFileSync(file, line({ msg: 'x'.repeat(500) }))
-    const stream = createTailStream({ dir: t.dir, query: {}, pollMs: 20, now: () => NOW })
+    const stream = createTailStream({ dir: t.dir, query: {}, pollMs: 20 })
     const done = readEvents(stream, (text) => text.includes('after truncate'))
     await sleep(60)
     writeFileSync(file, line({ msg: 'after truncate' }))
@@ -826,14 +838,13 @@ describe('live tail', () => {
   test('large appends are read in bounded chunks', async () => {
     const t = tempDir()
     cleanups.push(t.cleanup)
-    const file = join(t.dir, '2026-11-14.ndjson')
+    const file = join(t.dir, 'strutvane-2026-11-14.log')
     writeFileSync(file, '')
     const stream = createTailStream({
       dir: t.dir,
       query: {},
       pollMs: 10,
       maxReadBytes: 256,
-      now: () => NOW,
     })
     const done = readEvents(stream, (text) => text.includes('"n":49'))
     await sleep(30)

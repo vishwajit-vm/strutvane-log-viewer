@@ -4,7 +4,7 @@
  *
  * @module
  */
-import { isLogLevel } from '../levels.ts'
+import { toLevel } from '../levels.ts'
 
 /** A parsed log record as the viewer sees it. Unknown keys are kept. */
 export interface ViewerRecord {
@@ -98,8 +98,12 @@ export function parseRecordQuery(params: URLSearchParams): RecordQuery {
 
   const levels = text(params, 'level')
   if (levels !== undefined) {
-    const list = levels.split(',').map((l) => l.trim().toLowerCase())
-    for (const l of list) if (!isLogLevel(l)) throw new QueryError(`unknown level "${l}"`)
+    // Aliases (warn, fatal, trace) are accepted and mean their canonical level.
+    const list = levels.split(',').map((l) => {
+      const level = toLevel(l)
+      if (level === undefined) throw new QueryError(`unknown level "${l.trim()}"`)
+      return level
+    })
     query.levels = new Set(list)
   }
   const from = time(params, 'from')

@@ -13,7 +13,7 @@ import {
   withRequestLogging,
 } from '../src/adapters/node.ts'
 import { getLogContext } from '../src/context.ts'
-import { setDefaultLogger } from '../src/default.ts'
+import { setLogManager } from '../src/default.ts'
 import {
   createRequestLogger,
   levelFor,
@@ -24,6 +24,7 @@ import {
   sizeFrom,
 } from '../src/http/index.ts'
 import { createPipelineLogger, type StrutvaneLogger } from '../src/logger.ts'
+import { createLogManager } from '../src/manager.ts'
 import { memoryTransport, type Rec, waitFor } from './helpers.ts'
 
 function capture(): { logger: StrutvaneLogger; records: () => Promise<Rec[]> } {
@@ -41,7 +42,7 @@ function capture(): { logger: StrutvaneLogger; records: () => Promise<Rec[]> } {
 const servers: Server[] = []
 afterEach(async () => {
   for (const s of servers.splice(0)) await new Promise((r) => s.close(r))
-  setDefaultLogger(undefined)
+  setLogManager(undefined)
 })
 
 async function listen(listener: RequestListener): Promise<string> {
@@ -169,9 +170,16 @@ describe('Web handler (createRequestLogger)', () => {
 
   test('uses the default logger when none is given', async () => {
     const t = memoryTransport()
-    setDefaultLogger(createPipelineLogger({ transport: t }))
+    const manager = createLogManager({
+      config: {
+        default: 'mem',
+        channels: { mem: { driver: 'custom', via: () => t, format: 'json' } },
+      },
+      env: {},
+    })
+    setLogManager(manager)
     await createRequestLogger().handle(new Request('http://x/d'), () => new Response('ok'))
-    await createPipelineLogger({ transport: t }).flush()
+    await manager.flush()
     await waitFor(() => t.records().length === 1)
   })
 })
@@ -214,7 +222,7 @@ describe('node:http adapter', () => {
     await res.body?.cancel().catch(() => undefined)
     await waitFor(async () => (await c.records()).length === 1)
     expect((await c.records())[0]).toMatchObject({
-      level: 'warn',
+      level: 'warning',
       fields: { status: 499, aborted: true },
     })
   })

@@ -2,6 +2,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { compareLogFiles } from '../src/files.ts'
+import { parseLogLine } from '../src/format/parse.ts'
 import type { Batch, FileWriter, FileWriterFactory, Transport } from '../src/transports/types.ts'
 
 /** A fresh temp directory and its cleanup function. */
@@ -24,10 +25,10 @@ export type Rec = Record<string, unknown> & {
   err?: Record<string, unknown>
 }
 
-/** Parse every log file in `dir` in log order. Throws on any torn or invalid line. */
+/** Parse every log file in `dir` in log order (either format). Throws on any torn or invalid line. */
 export function readLogDir(dir: string): Array<{ file: string; records: Rec[] }> {
   return readdirSync(dir)
-    .filter((f) => f.endsWith('.ndjson'))
+    .filter((f) => f.endsWith('.log'))
     .sort(compareLogFiles)
     .map((file) => {
       const text = readFileSync(join(dir, file), 'utf8')
@@ -37,11 +38,9 @@ export function readLogDir(dir: string): Array<{ file: string; records: Rec[] }>
         .split('\n')
         .filter((l) => l.length > 0)
         .map((l, i) => {
-          try {
-            return JSON.parse(l) as Rec
-          } catch {
-            throw new Error(`${file}:${i + 1}: torn or invalid line: ${l.slice(0, 120)}`)
-          }
+          const record = parseLogLine(l)
+          if (!record) throw new Error(`${file}:${i + 1}: torn or invalid line: ${l.slice(0, 120)}`)
+          return record as Rec
         })
       return { file, records }
     })

@@ -5,8 +5,10 @@
  * Safety rules:
  *
  * - **Only Strutvane log files are read.** Names come from the directory listing and must match
- *   {@link LOG_FILE_PATTERN}; a client-supplied name is never joined into a path unchecked, so path
+ *   `LOG_FILE_PATTERN`; a client-supplied name is never joined into a path unchecked, so path
  *   traversal (`../../etc/passwd`) is impossible.
+ * - **Both formats are read** (`line` and `json`, even mixed in one directory) through
+ *   `parseLogLine`.
  * - **Every record is re-sanitised before it leaves the server,** in case a file was written by
  *   something other than this logger (defence in depth). Searches match the sanitised text, so a
  *   search can't be used to guess a secret character by character.
@@ -18,10 +20,21 @@
  * @module
  */
 import { createReadStream } from 'node:fs'
-import { open, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
-import { compareLogFiles, listLogFiles, parseLogFileName } from '../files.ts'
+import { compareLogFiles, DEFAULT_BASES, listLogFiles, parseLogFileName } from '../files.ts'
+import { parseLogLine } from '../format/parse.ts'
+import {
+  describeFiles,
+  type FileLine,
+  type LogFileInfo,
+  readLinesBackward,
+  readRange,
+} from '../read.ts'
+
+export type { FileLine, LogFileInfo }
+export { describeFiles, readLinesBackward, readRange }
+
 import { createSanitizer, type Sanitizer } from '../redact.ts'
 import { escapeLineSeparators } from '../serialize.ts'
 import {
@@ -32,36 +45,10 @@ import {
   type ViewerRecord,
 } from './filters.ts'
 
-/** One log file, as listed by the viewer. */
-export interface LogFileInfo {
-  readonly name: string
-  readonly day: string
-  readonly size: number
-  /** Last modification time (ISO 8601). */
-  readonly modified: string
-}
-
 /** Where to continue paging: the lines of `file` that start before byte offset `before`. */
 export interface Cursor {
   readonly file: string
   readonly before: number
-}
-
-/** Describe the log files in `dir`, newest first. Files that vanish meanwhile are skipped. */
-export async function describeFiles(dir: string): Promise<LogFileInfo[]> {
-  const out: LogFileInfo[] = []
-  for (const name of (await listLogFiles(dir)).reverse()) {
-    const parsed = parseLogFileName(name)
-    if (!parsed) continue
-    try {
-      const s = await stat(join(dir, name))
-      if (s.isFile())
-        out.push({ name, day: parsed.day, size: s.size, modified: s.mtime.toISOString() })
-    } catch {
-      // Deleted between listing and stat (retention or clear): skip it.
-    }
-  }
-  return out
 }
 
 /** Encode a cursor as an opaque URL-safe string. */
@@ -84,17 +71,12 @@ export function decodeCursor(value: string): Cursor | undefined {
   }
 }
 
-/** Parse one NDJSON line into a record, or `undefined` if it isn't a JSON object. */
+/**
+ * Parse one log line, in either format (`line` or `json`), into a record, or `undefined` if it
+ * isn't one. A directory may mix both formats (after a `LOG_FORMAT` change).
+ */
 export function parseLine(line: string): ViewerRecord | undefined {
-  if (!line.startsWith('{')) return undefined
-  try {
-    const value: unknown = JSON.parse(line)
-    return typeof value === 'object' && value !== null && !Array.isArray(value)
-      ? (value as ViewerRecord)
-      : undefined
-  } catch {
-    return undefined
-  }
+  return parseLogLine(line)
 }
 
 /** A record re-sanitised for output, with its one-line JSON form. */
@@ -132,6 +114,8 @@ export function accept(
 /** Options for {@link readPage}. */
 export interface PageOptions {
   readonly dir: string
+  /** File base names to read. Default: `strutvane`. */
+  readonly bases?: ReadonlySet<string>
   readonly query: RecordQuery
   readonly scope?: RecordFilter | undefined
   readonly limit: number
@@ -150,85 +134,23 @@ export interface Page {
   readonly scanned: number
 }
 
-/** Bytes read per step when scanning a file backwards. */
-const CHUNK_BYTES = 64 * 1024
-/** Lines longer than this are not records this logger wrote (they are capped far lower): skipped. */
-const MAX_LINE_BYTES = 1024 * 1024
-
-/** One complete line and the byte offset where it starts. */
-export interface FileLine {
-  readonly text: string
-  readonly start: number
-}
-
-/**
- * Yield the complete lines of a file that start before byte `end` (default: the file size),
- * newest first, reading backwards in chunks of `chunkBytes`. Whatever follows the last newline
- * before `end` is dropped: at the end of the file it is a line still being written. Lines longer
- * than 1 MiB are skipped without being buffered. A file that disappears or can't be read yields
- * nothing more.
- */
-export async function* readLinesBackward(
-  path: string,
-  end?: number,
-  chunkBytes: number = CHUNK_BYTES,
-): AsyncGenerator<FileLine> {
-  let handle: Awaited<ReturnType<typeof open>> | undefined
-  try {
-    handle = await open(path, 'r')
-    const size = (await handle.stat()).size
-    let pos = Math.min(end ?? size, size)
-    let tail = Buffer.alloc(0) // bytes of a line whose start hasn't been read yet
-    let oversized = false
-    let first = true // the segment after the last newline is incomplete: drop it
-    while (pos > 0) {
-      const from = Math.max(0, pos - chunkBytes)
-      const chunk = Buffer.alloc(pos - from)
-      let got = 0
-      while (got < chunk.length) {
-        const { bytesRead } = await handle.read(chunk, got, chunk.length - got, from + got)
-        if (bytesRead === 0) return // truncated meanwhile
-        got += bytesRead
-      }
-      const data = tail.length > 0 ? Buffer.concat([chunk, tail]) : chunk
-      let lineEnd = data.length
-      let nl = data.lastIndexOf(0x0a, lineEnd - 1)
-      while (nl !== -1) {
-        if (!first && !oversized && lineEnd - nl - 1 <= MAX_LINE_BYTES)
-          yield { text: data.subarray(nl + 1, lineEnd).toString('utf8'), start: from + nl + 1 }
-        first = false
-        oversized = false
-        lineEnd = nl
-        nl = lineEnd > 0 ? data.lastIndexOf(0x0a, lineEnd - 1) : -1
-      }
-      tail = Buffer.from(data.subarray(0, lineEnd))
-      if (tail.length > MAX_LINE_BYTES) {
-        oversized = true
-        tail = Buffer.alloc(0)
-      }
-      pos = from
-    }
-    if (!first && !oversized && tail.length > 0) yield { text: tail.toString('utf8'), start: 0 }
-  } catch {
-    // Deleted or unreadable meanwhile: nothing more from this file.
-  } finally {
-    await handle?.close().catch(() => undefined)
-  }
-}
-
 /** Read one page of matching records, newest first. */
 export async function readPage(options: PageOptions): Promise<Page> {
   const { dir, query, scope, limit, cursor } = options
   const maxScan = options.maxScanLines ?? 100_000
   const sanitize = options.sanitize ?? viewerSanitizer
   const range = dayRange(query)
-  const files = (await listLogFiles(dir)).reverse().filter((name) => {
-    const day = parseLogFileName(name)?.day ?? ''
-    if (range.from !== undefined && day < range.from) return false
-    if (range.to !== undefined && day > range.to) return false
-    // Continue at the cursor's file, or the next older one if it was deleted.
-    return cursor === undefined || compareLogFiles(name, cursor.file) <= 0
-  })
+  const files = (await listLogFiles(dir, options.bases ?? DEFAULT_BASES))
+    .reverse()
+    .filter((name) => {
+      const day = parseLogFileName(name)?.day
+      // A single file spans days, so the range can't skip it.
+      if (day === undefined) return cursor === undefined || compareLogFiles(name, cursor.file) <= 0
+      if (range.from !== undefined && day < range.from) return false
+      if (range.to !== undefined && day > range.to) return false
+      // Continue at the cursor's file, or the next older one if it was deleted.
+      return cursor === undefined || compareLogFiles(name, cursor.file) <= 0
+    })
 
   const records: ViewerRecord[] = []
   let scanned = 0
@@ -262,14 +184,26 @@ export async function readPage(options: PageOptions): Promise<Page> {
   return { records, scanned }
 }
 
-/** Stream the complete lines of every file for `day`, oldest first. */
-export async function* readDayLines(dir: string, day: string): AsyncGenerator<string> {
-  for (const name of await listLogFiles(dir)) {
-    if (parseLogFileName(name)?.day !== day) continue
+/**
+ * Stream the complete lines of every file for `day`, oldest file first. Single files span days, so
+ * only their lines whose timestamp falls on `day` are included.
+ */
+export async function* readDayLines(
+  dir: string,
+  day: string,
+  bases: ReadonlySet<string> = DEFAULT_BASES,
+): AsyncGenerator<string> {
+  for (const name of await listLogFiles(dir, bases)) {
+    const parsed = parseLogFileName(name)
+    if (!parsed || (parsed.day !== undefined && parsed.day !== day)) continue
     const stream = createReadStream(join(dir, name), { encoding: 'utf8' })
     const lines = createInterface({ input: stream, crlfDelay: Number.POSITIVE_INFINITY })
     try {
-      for await (const line of lines) if (line) yield line
+      for await (const line of lines) {
+        if (!line) continue
+        if (parsed.day === undefined && !onDay(line, day)) continue
+        yield line
+      }
     } catch {
       // Deleted while reading: move on.
     } finally {
@@ -279,28 +213,7 @@ export async function* readDayLines(dir: string, day: string): AsyncGenerator<st
   }
 }
 
-/** Read bytes `[start, end)` of a file. Returns an empty buffer if the file is gone. */
-export async function readRange(path: string, start: number, end: number): Promise<Buffer> {
-  if (end <= start) return Buffer.alloc(0)
-  let handle: Awaited<ReturnType<typeof open>> | undefined
-  try {
-    handle = await open(path, 'r')
-    const buffer = Buffer.alloc(end - start)
-    let offset = 0
-    while (offset < buffer.length) {
-      const { bytesRead } = await handle.read(
-        buffer,
-        offset,
-        buffer.length - offset,
-        start + offset,
-      )
-      if (bytesRead === 0) break
-      offset += bytesRead
-    }
-    return buffer.subarray(0, offset)
-  } catch {
-    return Buffer.alloc(0)
-  } finally {
-    await handle?.close().catch(() => undefined)
-  }
+function onDay(line: string, day: string): boolean {
+  const time = parseLogLine(line)?.time
+  return typeof time === 'string' && time.startsWith(day)
 }

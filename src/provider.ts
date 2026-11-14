@@ -11,8 +11,9 @@
  *   Otherwise (no route matched, or an older framework) the raw path is logged through `safePath`
  *   (secrets redacted, token-like segments masked, length capped).
  *
- * Settings come from `config/logging.ts` (`level`, `format`, `driver`, `path`, `retentionDays`,
- * `maxDailySize`, `requests`, `viewer`), falling back to the `LOG_*`/`LOGS_*` environment. The
+ * Channels come from `config/logging.ts` (`default`, `channels`, `deprecations`, `path`; ADR-0022),
+ * filled in from the `LOG_*` environment, plus `requests` and `viewer`. The provider also points
+ * the `Log` facade at this app's channels. The
  * viewer follows the RFC-0004 access rules: open when `APP_ENV=local` (for loopback hosts only,
  * and, when the payload carries `clientAddress`, for a loopback peer only),
  * otherwise only with `LOGS_VIEWER_TOKEN`, and a 404 (not a 403) for everyone else, so its
@@ -24,7 +25,6 @@
  *
  * @module
  */
-import { isAbsolute, resolve } from 'node:path'
 import {
   HTTP_HOOKS,
   type HttpRequestHookPayload,
@@ -37,10 +37,10 @@ import {
   LoggerToken,
   type Provider,
 } from '@strutvane/core'
-import { parseSize } from './config.ts'
-import { createLogger } from './create.ts'
+import type { LoggingConfig } from './config.ts'
+import { setLogManager } from './default.ts'
 import { logCompletedRequest, pathOf, resolveRequestLogging, safePath } from './http/core.ts'
-import type { StrutvaneLogger } from './logger.ts'
+import { createLogManager, type LogManager } from './manager.ts'
 import { createViewerHandler, type ViewerHandler, type ViewerOptions } from './viewer/handler.ts'
 
 /** Viewer access settings that can't come from the environment (functions and lists). */
@@ -49,15 +49,8 @@ export type ViewerAccessOptions = Pick<
   'authorize' | 'ipAllowList' | 'scopeRecords' | 'onAudit'
 >
 
-/** `config/logging.ts`, as far as the provider reads it. */
-export interface AppLoggingConfig {
-  readonly enabled?: boolean
-  readonly level?: string
-  readonly format?: string
-  readonly driver?: string
-  readonly path?: string
-  readonly retentionDays?: number
-  readonly maxDailySize?: string
+/** `config/logging.ts`: the channels (see `LoggingConfig`) plus request logging and the viewer. */
+export interface AppLoggingConfig extends LoggingConfig {
   readonly requests?: { readonly ignore?: readonly string[]; readonly slowThresholdMs?: number }
   readonly viewer?: {
     readonly enabled?: boolean
@@ -82,32 +75,18 @@ const section = <T>(app: Application, name: string): T | undefined =>
  * createLogsProvider({ viewer: { authorize: (req) => isAdmin(req), ipAllowList: ['10.0.0.0/8'] } })
  */
 export function createLogsProvider(options: LogsProviderOptions = {}): Provider {
-  let logger: StrutvaneLogger | undefined
+  let logger: LogManager | undefined
   return defineProvider({
     name: '@strutvane/logs',
     register(app) {
       const cfg = section<AppLoggingConfig>(app, 'logging') ?? {}
       const root = section<{ root?: string }>(app, 'app')?.root ?? process.cwd()
-      const maxDailyBytes = cfg.maxDailySize ? parseSize(cfg.maxDailySize) : undefined
-      const path = cfg.path
-        ? isAbsolute(cfg.path)
-          ? cfg.path
-          : resolve(root, cfg.path)
-        : undefined
-      logger = createLogger({
-        ...(cfg.enabled !== undefined ? { enabled: cfg.enabled } : {}),
-        ...(cfg.level ? { level: cfg.level as never } : {}),
-        ...(cfg.format ? { format: cfg.format as never } : {}),
-        ...(cfg.driver ? { driver: cfg.driver as never } : {}),
-        ...(path ? { path } : {}),
-        ...(cfg.retentionDays !== undefined ? { retentionDays: cfg.retentionDays } : {}),
-        ...(maxDailyBytes !== undefined ? { maxDailyBytes } : {}),
-      })
+      logger = createLogManager({ config: channelsOf(cfg), root })
+      setLogManager(logger)
       app.container.value(LoggerToken, logger)
     },
     boot(app) {
       const cfg = section<AppLoggingConfig>(app, 'logging') ?? {}
-      const root = section<{ root?: string }>(app, 'app')?.root ?? process.cwd()
       const active = logger
       if (!active) return
       const requests = resolveRequestLogging({
@@ -119,17 +98,18 @@ export function createLogsProvider(options: LogsProviderOptions = {}): Provider 
       })
       let viewer: ViewerHandler | undefined
       if (cfg.viewer?.enabled !== false) {
-        const dir = cfg.path
-          ? isAbsolute(cfg.path)
-            ? cfg.path
-            : resolve(root, cfg.path)
-          : undefined
+        const dir = active.config.path
+        // Every file channel writing into the viewer's directory.
+        const bases = Object.values(active.config.channels).flatMap((c) =>
+          (c.driver === 'single' || c.driver === 'daily') && c.dir === dir ? [c.base] : [],
+        )
         const access: ViewerAccessOptions = {
           ...pickAccess(cfg.viewer ?? {}),
           ...pickAccess(options.viewer ?? {}),
         }
         viewer = createViewerHandler({
-          ...(dir ? { dir } : {}),
+          dir,
+          bases: bases.length > 0 ? [...new Set(bases)] : ['strutvane'],
           ...(cfg.viewer?.path ? { basePath: cfg.viewer.path } : {}),
           ...(cfg.viewer?.token ? { token: cfg.viewer.token } : {}),
           ...access,
@@ -182,6 +162,16 @@ export function createLogsProvider(options: LogsProviderOptions = {}): Provider 
       await logger?.flush()
     },
   })
+}
+
+/** The channel part of `config/logging.ts` (request and viewer settings are the provider's). */
+function channelsOf(cfg: AppLoggingConfig): LoggingConfig {
+  return {
+    ...(cfg.default === undefined ? {} : { default: cfg.default }),
+    ...(cfg.channels === undefined ? {} : { channels: cfg.channels }),
+    ...(cfg.deprecations === undefined ? {} : { deprecations: cfg.deprecations }),
+    ...(cfg.path === undefined ? {} : { path: cfg.path }),
+  }
 }
 
 /** Keep only the viewer access keys that are actually set. */

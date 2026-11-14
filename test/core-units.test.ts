@@ -1,19 +1,23 @@
 /** Unit tests for the small building blocks: levels, context, records, serialisation, queue, files. */
-import { mkdirSync, utimesSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 import fc from 'fast-check'
-import { afterEach, describe, expect, test } from 'vitest'
-import { getLogContext, runWithLogContext } from '../src/context.ts'
+import { describe, expect, test } from 'vitest'
 import {
-  applyRetention,
-  compareLogFiles,
-  dayKeyOf,
-  fileName,
-  isDayKey,
-  listLogFiles,
-  parseLogFileName,
-} from '../src/files.ts'
-import { IMPORTANT_SEVERITY, isLogLevel, LOG_LEVELS, severityOf } from '../src/levels.ts'
+  addToLogContext,
+  getLogContext,
+  removeFromLogContext,
+  runWithLogContext,
+} from '../src/context.ts'
+import {
+  IMPORTANT_PRIORITY,
+  isLevel,
+  isLevelName,
+  LEVEL_ALIASES,
+  LEVEL_PRIORITY,
+  LEVELS,
+  priorityOf,
+  RFC5424_CODE,
+  toLevel,
+} from '../src/levels.ts'
 import { BoundedQueue, type QueueItem } from '../src/queue.ts'
 import { buildRecord, toMessage } from '../src/record.ts'
 import {
@@ -23,21 +27,47 @@ import {
   PARAGRAPH_SEPARATOR,
   serializeRecord,
 } from '../src/serialize.ts'
-import { tempDir } from './helpers.ts'
-
-const cleanups: Array<() => void> = []
-afterEach(() => {
-  for (const c of cleanups.splice(0)) c()
-})
 
 describe('levels', () => {
-  test('six levels in order, warn and above are important', () => {
-    expect(LOG_LEVELS).toEqual(['trace', 'debug', 'info', 'warn', 'error', 'fatal'])
-    expect(severityOf('trace')).toBeLessThan(severityOf('fatal'))
-    expect(IMPORTANT_SEVERITY).toBe(severityOf('warn'))
-    expect(isLogLevel('info')).toBe(true)
-    expect(isLogLevel('verbose')).toBe(false)
-    expect(isLogLevel(3)).toBe(false)
+  test('the eight RFC 5424 levels in order; warning and above are important', () => {
+    expect(LEVELS).toEqual([
+      'debug',
+      'info',
+      'notice',
+      'warning',
+      'error',
+      'critical',
+      'alert',
+      'emergency',
+    ])
+    for (let i = 1; i < LEVELS.length; i++) {
+      const lower = LEVELS[i - 1] ?? 'debug'
+      const higher = LEVELS[i] ?? 'debug'
+      expect(LEVEL_PRIORITY[lower]).toBeLessThan(LEVEL_PRIORITY[higher])
+      expect(RFC5424_CODE[lower]).toBeGreaterThan(RFC5424_CODE[higher])
+    }
+    expect(RFC5424_CODE.emergency).toBe(0)
+    expect(RFC5424_CODE.debug).toBe(7)
+    expect(IMPORTANT_PRIORITY).toBe(LEVEL_PRIORITY.warning)
+    expect(isLevel('notice')).toBe(true)
+    expect(isLevel('warn')).toBe(false)
+    expect(isLevel(3)).toBe(false)
+  })
+
+  test('aliases resolve to canonical levels (v1 callers keep working)', () => {
+    expect(LEVEL_ALIASES).toEqual({ trace: 'debug', warn: 'warning', fatal: 'critical' })
+    expect(toLevel('warn')).toBe('warning')
+    expect(toLevel('FATAL')).toBe('critical')
+    expect(toLevel(' trace ')).toBe('debug')
+    expect(toLevel('Emergency')).toBe('emergency')
+    expect(toLevel('verbose')).toBeUndefined()
+    expect(toLevel('toString')).toBeUndefined()
+    expect(toLevel(7)).toBeUndefined()
+    expect(isLevelName('fatal')).toBe(true)
+    expect(isLevelName('constructor')).toBe(false)
+    expect(priorityOf('fatal')).toBe(priorityOf('critical'))
+    expect(priorityOf('warn')).toBe(LEVEL_PRIORITY.warning)
+    expect(priorityOf('nope' as 'info')).toBe(-1)
   })
 })
 
@@ -51,6 +81,25 @@ describe('context', () => {
         expect(getLogContext()).toEqual({ requestId: 'r1', tenantId: 't2', extra: 1 })
       })
     })
+  })
+
+  test('withContext values stay in their scope; clearing keeps the request ids', () => {
+    expect(addToLogContext({ x: 1 })).toBe(false)
+    expect(removeFromLogContext()).toBe(false)
+    const input = { requestId: 'r1' }
+    runWithLogContext(input, () => {
+      expect(addToLogContext({ orderId: 42, step: 'pay' })).toBe(true)
+      runWithLogContext({ inner: true }, () => {
+        addToLogContext({ innerOnly: 1 })
+        expect(getLogContext()).toMatchObject({ orderId: 42, inner: true, innerOnly: 1 })
+      })
+      expect(getLogContext()).toEqual({ requestId: 'r1', orderId: 42, step: 'pay' })
+      removeFromLogContext(['step'])
+      expect(getLogContext()).toEqual({ requestId: 'r1', orderId: 42 })
+      removeFromLogContext()
+      expect(getLogContext()).toEqual({ requestId: 'r1' })
+    })
+    expect(input).toEqual({ requestId: 'r1' }) // the caller's object is never mutated
   })
 })
 
@@ -78,6 +127,16 @@ describe('buildRecord', () => {
       fields: { service: 'api', region: 'eu', empty: '', invoiceId: 1 },
       err,
     })
+  })
+
+  test('base context has the lowest precedence', () => {
+    const rec = buildRecord('info', 'm', { b: 'binding' }, { c: 'ctx' }, { f: 'field' }, T, {
+      b: 'base',
+      c: 'base',
+      f: 'base',
+      only: 'base',
+    })
+    expect(rec.fields).toEqual({ b: 'binding', c: 'ctx', f: 'field', only: 'base' })
   })
 
   test('`error` is accepted as the error key; no fields means no fields key', () => {
@@ -159,14 +218,14 @@ describe('serializeRecord', () => {
 describe('BoundedQueue', () => {
   let seq = 0
   const item = (
-    level: 'debug' | 'info' | 'warn' | 'error',
+    level: 'debug' | 'info' | 'notice' | 'warning' | 'error',
     bytes = 10,
     dayKey = '2026-11-14',
   ): QueueItem => ({
     seq: seq++,
     line: 'x',
     bytes,
-    severity: severityOf(level),
+    priority: LEVEL_PRIORITY[level],
     level,
     dayKey,
   })
@@ -175,14 +234,15 @@ describe('BoundedQueue', () => {
     expect(() => new BoundedQueue({ maxRecords: 0, maxBytes: 10 })).toThrow(RangeError)
   })
 
-  test('a full queue drops new low-severity records but evicts for important ones', () => {
+  test('a full queue drops new debug/info/notice records but evicts for warning and up', () => {
     const q = new BoundedQueue({ maxRecords: 2, maxBytes: 1_000 })
     expect(q.push(item('info'))).toBe('queued')
-    expect(q.push(item('warn'))).toBe('queued')
+    expect(q.push(item('warning'))).toBe('queued')
     expect(q.push(item('debug'))).toBe('dropped')
+    expect(q.push(item('notice'))).toBe('dropped')
     expect(q.push(item('error'))).toBe('evicted-other') // evicts the info
-    expect(q.push(item('error'))).toBe('evicted-other') // only important left: evicts the oldest warn
-    expect(q.takeDropped()).toEqual({ debug: 1, info: 1, warn: 1 })
+    expect(q.push(item('error'))).toBe('evicted-other') // only important left: evicts the oldest warning
+    expect(q.takeDropped()).toEqual({ debug: 1, notice: 1, info: 1, warning: 1 })
     expect(q.takeDropped()).toBeUndefined()
     expect(q.size).toBe(2)
     expect(q.peakRecords).toBe(2)
@@ -206,77 +266,5 @@ describe('BoundedQueue', () => {
     expect(q.takeBatch(1_000)).toEqual([d])
     expect(q.takeBatch(1_000)).toEqual([])
     expect(q.peakBytes).toBe(40)
-  })
-})
-
-describe('log file names', () => {
-  test('parse, build and validate', () => {
-    expect(fileName('2026-11-14', 0)).toBe('2026-11-14.ndjson')
-    expect(fileName('2026-11-14', 3, 'w2')).toBe('2026-11-14.w2-3.ndjson')
-    expect(parseLogFileName('2026-11-14.w2-3.ndjson')).toEqual({
-      day: '2026-11-14',
-      tag: 'w2',
-      part: 3,
-    })
-    expect(parseLogFileName('2026-02-30.ndjson')).toBeUndefined()
-    expect(parseLogFileName('../2026-11-14.ndjson')).toBeUndefined()
-    expect(parseLogFileName('notes.txt')).toBeUndefined()
-    expect(isDayKey('2026-11-14')).toBe(true)
-    expect(isDayKey('2026-13-01')).toBe(false)
-    expect(isDayKey('20261114')).toBe(false)
-    expect(dayKeyOf(Date.parse('2026-11-14T23:59:59Z'))).toBe('2026-11-14')
-  })
-
-  test('compareLogFiles orders by day, tag, then part NUMBER (string sort is wrong)', () => {
-    const names = [
-      'z.txt',
-      '2026-11-14-10.ndjson',
-      '2026-11-14.w1.ndjson',
-      '2026-11-14-2.ndjson',
-      'a.txt',
-      '2026-11-13.ndjson',
-      '2026-11-14.ndjson',
-    ]
-    expect(names.sort(compareLogFiles)).toEqual([
-      '2026-11-13.ndjson',
-      '2026-11-14.ndjson',
-      '2026-11-14-2.ndjson',
-      '2026-11-14-10.ndjson',
-      '2026-11-14.w1.ndjson',
-      'a.txt',
-      'z.txt',
-    ])
-    expect(compareLogFiles('a.txt', 'a.txt')).toBe(0)
-  })
-
-  test('listLogFiles ignores foreign files; a missing dir is empty', async () => {
-    const { dir, cleanup } = tempDir()
-    cleanups.push(cleanup)
-    writeFileSync(join(dir, '2026-11-14-1.ndjson'), '')
-    writeFileSync(join(dir, '2026-11-14.ndjson'), '')
-    writeFileSync(join(dir, 'secrets.env'), '')
-    expect(await listLogFiles(dir)).toEqual(['2026-11-14.ndjson', '2026-11-14-1.ndjson'])
-    expect(await listLogFiles(join(dir, 'missing'))).toEqual([])
-  })
-
-  test('retention deletes only old Strutvane log files, by name', async () => {
-    const { dir, cleanup } = tempDir()
-    cleanups.push(cleanup)
-    for (const n of [
-      '2026-09-01.ndjson',
-      '2026-09-01.w1-2.ndjson',
-      '2026-11-10.ndjson',
-      'keep.ndjson.bak',
-      '2020-01-01.txt',
-    ]) {
-      writeFileSync(join(dir, n), 'x\n')
-    }
-    // A directory with a log-like name can't be unlinked: skipped, never fatal.
-    mkdirSync(join(dir, '2026-08-01.ndjson'))
-    utimesSync(join(dir, '2026-11-10.ndjson'), new Date(0), new Date(0)) // mtime is irrelevant
-    const deleted = await applyRetention(dir, 30, Date.parse('2026-11-14T00:00:00Z'))
-    expect(deleted.sort()).toEqual(['2026-09-01.ndjson', '2026-09-01.w1-2.ndjson'])
-    expect((await listLogFiles(dir)).sort()).toEqual(['2026-08-01.ndjson', '2026-11-10.ndjson'])
-    expect(await applyRetention(dir, 0, Date.now())).toEqual([])
   })
 })

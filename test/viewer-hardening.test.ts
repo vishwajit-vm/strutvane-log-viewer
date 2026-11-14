@@ -42,10 +42,13 @@ function dir(): string {
 function fixture(): string {
   const d = dir()
   writeFileSync(
-    join(d, '2026-11-13.ndjson'),
+    join(d, 'strutvane-2026-11-13.log'),
     line({ time: '2026-11-13T09:00:00.000Z', tenantId: 'acme' }),
   )
-  writeFileSync(join(d, '2026-11-14.ndjson'), line({ tenantId: 'acme' }) + line({ tenantId: 'x' }))
+  writeFileSync(
+    join(d, 'strutvane-2026-11-14.log'),
+    line({ tenantId: 'acme' }) + line({ tenantId: 'x' }),
+  )
   return d
 }
 
@@ -231,7 +234,6 @@ describe('tail slots are released on every disconnect path', () => {
       query: {},
       heartbeatMs: 10,
       stallBeats: 2,
-      now: () => NOW,
       onClose: () => closed++,
     })
     await vi.waitFor(() => expect(closed).toBe(1), { timeout: 5_000, interval: 10 })
@@ -246,7 +248,6 @@ describe('tail slots are released on every disconnect path', () => {
       query: {},
       heartbeatMs: 10,
       stallBeats: 1,
-      now: () => NOW,
       onClose: () => closed++,
     })
     const reader = stream.getReader()
@@ -269,7 +270,6 @@ describe('tail slots are released on every disconnect path', () => {
       dir: dir(),
       query: {},
       maxQueuedBytes: 4,
-      now: () => NOW,
       onClose: () => closed++,
     })
     await vi.waitFor(() => expect(closed).toBe(1), { timeout: 5_000, interval: 10 })
@@ -285,7 +285,6 @@ describe('tail slots are released on every disconnect path', () => {
       dir: dir(),
       query: {},
       maxDurationMs: 30,
-      now: () => NOW,
       onClose: () => closed++,
     })
     const reader = stream.getReader()
@@ -313,7 +312,10 @@ describe('scoped viewers and the file list', () => {
       scoped?: boolean
     }
     expect(res.scoped).toBeUndefined()
-    expect(res.files.map((f) => f.name)).toEqual(['2026-11-14.ndjson', '2026-11-13.ndjson'])
+    expect(res.files.map((f) => f.name)).toEqual([
+      'strutvane-2026-11-14.log',
+      'strutvane-2026-11-13.log',
+    ])
     expect(res.files.every((f) => f.size > 0)).toBe(true)
   })
 })
@@ -326,7 +328,7 @@ describe('files are read backwards in bounded chunks', () => {
   }
 
   test('every complete line, newest first, with byte offsets, whatever the chunk size', async () => {
-    const file = join(dir(), '2026-11-14.ndjson')
+    const file = join(dir(), 'strutvane-2026-11-14.log')
     const lines = ['{"n":1}', '{"msg":"ünïcödé ✓"}', '', '{"n":3}']
     const content = `${lines.join('\n')}\n`
     writeFileSync(file, `${content}{"partial`)
@@ -354,7 +356,7 @@ describe('files are read backwards in bounded chunks', () => {
   })
 
   test('a line too long to be a record is skipped without being buffered', async () => {
-    const file = join(dir(), '2026-11-14.ndjson')
+    const file = join(dir(), 'strutvane-2026-11-14.log')
     writeFileSync(file, `{"n":1}\n${'x'.repeat(1_100_000)}\n{"n":2}\n`)
     expect((await collect(file)).map((l) => l.text)).toEqual(['{"n":2}', '{"n":1}'])
     writeFileSync(file, `${'y'.repeat(1_100_000)}\n{"n":2}\n`)
@@ -365,7 +367,7 @@ describe('files are read backwards in bounded chunks', () => {
     const d = dir()
     const total = 3_000
     writeFileSync(
-      join(d, '2026-11-14.ndjson'),
+      join(d, 'strutvane-2026-11-14.log'),
       Array.from({ length: total }, (_, n) => line({ msg: `m${n}`, pad: 'p'.repeat(40) })).join(''),
     )
     const seen = new Set<unknown>()

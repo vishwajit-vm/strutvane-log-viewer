@@ -12,6 +12,7 @@
  *
  * @module
  */
+import { LEVELS as LEVEL_NAMES } from '../levels.ts'
 
 /** Escape text for an HTML attribute value or text node. */
 export function escapeHtml(value: string): string {
@@ -56,8 +57,8 @@ li.row:hover{background:var(--row-hover)}
 .line{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
 .time{color:var(--muted);font-variant-numeric:tabular-nums;min-width:72px}
 .badge{font-size:11px;font-weight:700;text-transform:uppercase;padding:1px 6px;border-radius:4px;border:1px solid currentColor}
-.lvl-trace{color:var(--trace)}.lvl-debug{color:var(--debug)}.lvl-info{color:var(--info)}.lvl-warn{color:var(--warn)}
-.lvl-error{color:var(--error)}.lvl-fatal{color:var(--fatal);background:var(--fatal-bg);border-color:var(--fatal-bg)}
+.lvl-debug{color:var(--debug)}.lvl-info,.lvl-notice{color:var(--info)}.lvl-warning{color:var(--warn)}
+.lvl-error{color:var(--error)}.lvl-critical,.lvl-alert,.lvl-emergency{color:var(--fatal);background:var(--fatal-bg);border-color:var(--fatal-bg)}
 .msg{word-break:break-word;flex:1;min-width:200px}
 .rid{color:var(--muted);font-size:12px;font-family:ui-monospace,Consolas,monospace}
 details pre{margin:6px 0 2px;padding:8px;overflow:auto;background:var(--bg);border-radius:6px;font-size:12px;
@@ -240,7 +241,8 @@ const SCRIPT = `
 })();
 `
 
-const LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal'] as const
+// The eight RFC 5424 levels (ADR-0022), least severe first.
+const LEVELS = LEVEL_NAMES
 
 /** Render the viewer page. `basePath` must already be validated; it is escaped regardless. */
 export function renderViewerPage(options: {
@@ -250,7 +252,7 @@ export function renderViewerPage(options: {
   const nonce = escapeHtml(options.nonce)
   const levelBoxes = LEVELS.map(
     (l) =>
-      `<label class="lvl-${l}" for="level-${l}"><span>${l}</span><input type="checkbox" name="level" id="level-${l}" value="${l}"${l === 'trace' || l === 'debug' ? '' : ' checked'}></label>`,
+      `<label class="lvl-${l}" for="level-${l}"><span>${l}</span><input type="checkbox" name="level" id="level-${l}" value="${l}"${l === 'debug' ? '' : ' checked'}></label>`,
   ).join('')
   return `<!doctype html>
 <html lang="en">

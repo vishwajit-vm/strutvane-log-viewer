@@ -33,7 +33,7 @@ const hung: Transport = {
   close: () => Promise.resolve(),
 }
 const transport: Transport =
-  scenario === 'hung' ? hung : fileTransport({ dir, writer: slowWriter, retentionDays: 0 })
+  scenario === 'hung' ? hung : fileTransport({ dir, writer: slowWriter, days: 0 })
 const log = createPipelineLogger({
   transport,
   sanitize: { redact: false },

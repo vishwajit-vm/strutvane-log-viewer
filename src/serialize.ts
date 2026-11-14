@@ -24,14 +24,35 @@ function safeSlice(msg: unknown): string {
   return typeof msg === 'string' ? msg.slice(0, 1024) : '[non-string message]'
 }
 
-/** Escape U+2028/U+2029 inside an already-serialised JSON string. */
+// Built from escape sequences in a string, never literal characters (CLAUDE.md "Gotchas").
+const UNSAFE_CLASS = '[\\u007f-\\u009f\\u2028\\u2029]'
+const UNSAFE_TEST = new RegExp(UNSAFE_CLASS)
+const UNSAFE_ALL = new RegExp(UNSAFE_CLASS, 'g')
+
+/**
+ * `\uXXXX` for one UTF-16 code unit: the escape both formats use for characters that must never
+ * reach a file or a terminal raw.
+ *
+ * @example
+ * unicodeEscape(String.fromCharCode(0x1b)) // the six characters \u001b
+ */
+export function unicodeEscape(char: string): string {
+  return `${BACKSLASH}u${char.charCodeAt(0).toString(16).padStart(4, '0')}`
+}
+
+/**
+ * Escape U+2028/U+2029, DEL and the C1 control characters (U+007F to U+009F) inside an
+ * already-serialised JSON string. `JSON.stringify` leaves them raw, but some viewers treat the
+ * first two as line breaks, and U+009B is a one-character ANSI "CSI" in terminals that honour
+ * 8-bit controls. They can only occur inside JSON string values (JSON's own syntax is ASCII), so
+ * the result is still valid JSON that parses back to the same value.
+ *
+ * @example
+ * escapeLineSeparators(JSON.stringify({ msg: `a${LINE_SEPARATOR}` })) // the separator becomes a 6-character escape
+ */
 export function escapeLineSeparators(json: string): string {
-  if (!json.includes(LINE_SEPARATOR) && !json.includes(PARAGRAPH_SEPARATOR)) return json
-  return json
-    .split(LINE_SEPARATOR)
-    .join(`${BACKSLASH}u2028`)
-    .split(PARAGRAPH_SEPARATOR)
-    .join(`${BACKSLASH}u2029`)
+  if (!UNSAFE_TEST.test(json)) return json
+  return json.replace(UNSAFE_ALL, unicodeEscape)
 }
 
 /** What the serialiser needs to know about a record (the rest is serialised as-is). */

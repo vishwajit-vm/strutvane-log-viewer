@@ -83,16 +83,18 @@ describe('several processes, one log directory', () => {
     const cap = 256 * 1024
     const results = await Promise.all(
       Array.from({ length: procs }, (_, id) =>
-        run([writerChild, d, String(id), String(count), String(cap)]),
+        run([writerChild, d, String(id), String(count), String(cap), id % 2 ? 'line' : 'json']),
       ),
     )
     for (const r of results) expect(r.code).toBe(0)
 
-    const files = readdirSync(d).filter((f) => f.endsWith('.ndjson'))
+    const files = readdirSync(d).filter((f) => f.endsWith('.log'))
     for (const f of files) {
-      expect(f).toMatch(/\.w\d+(-\d+)?\.ndjson$/)
+      // The main process keeps the plain name; workers get their own files.
+      expect(f).toMatch(/^strutvane-\d{4}-\d{2}-\d{2}(\.worker-[123])?(-\d+)?\.log$/)
       expect(statSync(join(d, f)).size).toBeLessThanOrEqual(cap)
     }
+    expect(files.some((f) => !f.includes('.worker-'))).toBe(true)
     const perProc = new Map<number, Set<number>>()
     for (const r of allRecords(d)) {
       const f = r.fields as { proc: number; i: number }

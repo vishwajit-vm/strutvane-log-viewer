@@ -21,10 +21,9 @@
  * @module
  */
 import { createHmac, randomBytes } from 'node:crypto'
-import { unlink } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
-import { type Env, resolveLogsConfig } from '../config.ts'
-import { dayKeyOf, isDayKey, listLogFiles, parseLogFileName } from '../files.ts'
+import { resolve } from 'node:path'
+import { type Env, resolveLogPath } from '../config.ts'
+import { clearLogFiles, DEFAULT_LOG_BASE, dayKeyOf, isDayKey, isLogBaseName } from '../files.ts'
 import {
   type AccessPolicy,
   type AuthorizeFn,
@@ -61,8 +60,13 @@ export interface ViewerAuditEvent {
 
 /** Viewer options. Every option is optional; the defaults are safe. */
 export interface ViewerOptions {
-  /** Log directory. Default: `LOGS_PATH` or `storage/logs`, resolved from the working directory. */
+  /** Log directory. Default: `LOG_PATH` or `storage/logs`, resolved from the working directory. */
   readonly dir?: string
+  /**
+   * File base names the viewer reads and clears (the file channels in `dir`). Default:
+   * `['strutvane']`. Other files in the directory are never shown or deleted.
+   */
+  readonly bases?: readonly string[]
   /** URL prefix. Default: `/_strutvane/logs`. Letters, digits, `/`, `_` and `-` only. */
   readonly basePath?: string
   /** Your own access rule. When set, it replaces the local/token rules. */
@@ -91,7 +95,7 @@ export interface ViewerOptions {
   readonly heartbeatMs?: number
   /** Lines examined per search request before returning a cursor. Default: 100,000. */
   readonly maxScanLines?: number
-  /** Environment to read (`APP_ENV`, `LOGS_PATH`, `LOGS_VIEWER_TOKEN`). Default: `process.env`. */
+  /** Environment to read (`APP_ENV`, `LOG_PATH`, `LOGS_VIEWER_TOKEN`). Default: `process.env`. */
   readonly env?: Env
   /** Clock, for tests. */
   readonly now?: () => number
@@ -219,7 +223,12 @@ export function createViewerHandler(options: ViewerOptions = {}): ViewerHandler 
       `viewer basePath "${basePath}" is invalid: use a path like /_strutvane/logs`,
     )
   }
-  const dir = resolve(options.dir ?? resolveLogsConfig({}, env).config.path)
+  const dir = resolve(options.dir ?? resolveLogPath(env))
+  const bases: ReadonlySet<string> = new Set(options.bases ?? [DEFAULT_LOG_BASE])
+  for (const base of bases) {
+    if (!isLogBaseName(base))
+      throw new TypeError(`invalid viewer base name "${base}": use letters, digits and _`)
+  }
   const maxTails = options.maxTails ?? 5
   if (!Number.isInteger(maxTails) || maxTails < 0)
     throw new RangeError('maxTails must be a non-negative integer')
@@ -273,7 +282,7 @@ export function createViewerHandler(options: ViewerOptions = {}): ViewerHandler 
    * and modification times describe everyone's activity, not just its own records.
    */
   const files = async (scoped: boolean): Promise<Response> => {
-    const all = await describeFiles(dir)
+    const all = await describeFiles(dir, bases)
     if (!scoped) return json(200, { files: all })
     const days = [...new Set(all.map((f) => f.day))]
     return json(200, { files: days.map((day) => ({ day })), scoped: true })
@@ -295,6 +304,7 @@ export function createViewerHandler(options: ViewerOptions = {}): ViewerHandler 
       return fail(400, 'Invalid query', 'cursor is invalid')
     const result = await readPage({
       dir,
+      bases,
       query,
       scope,
       limit,
@@ -316,7 +326,7 @@ export function createViewerHandler(options: ViewerOptions = {}): ViewerHandler 
     if (format !== 'ndjson' && format !== 'csv')
       return fail(400, 'Invalid query', 'format must be ndjson or csv')
     const encoder = new TextEncoder()
-    const lines = readDayLines(dir, day)
+    const lines = readDayLines(dir, day, bases)
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         if (format === 'csv') controller.enqueue(encoder.encode(csvHeader()))
@@ -375,10 +385,10 @@ export function createViewerHandler(options: ViewerOptions = {}): ViewerHandler 
     try {
       const stream = createTailStream({
         dir,
+        bases,
         query,
         scope,
         signal: request.signal,
-        now,
         ...(options.tailPollMs === undefined ? {} : { pollMs: options.tailPollMs }),
         ...(options.heartbeatMs === undefined ? {} : { heartbeatMs: options.heartbeatMs }),
         onClose: release,
@@ -434,17 +444,8 @@ export function createViewerHandler(options: ViewerOptions = {}): ViewerHandler 
       // Today's files are never deleted: active writers append to them.
       if (body.before < today) before = body.before
     }
-    const deleted: string[] = []
-    for (const name of await listLogFiles(dir)) {
-      const day = parseLogFileName(name)?.day
-      if (day === undefined || day >= before) continue
-      try {
-        await unlink(join(dir, name))
-        deleted.push(name)
-      } catch {
-        // Already gone or locked: skip.
-      }
-    }
+    // The newest file of every writer stream is never deleted either (it may be live).
+    const { deleted } = await clearLogFiles(dir, { before, bases })
     audit({
       action: 'clear',
       time: new Date(now()).toISOString(),

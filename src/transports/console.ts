@@ -1,15 +1,25 @@
 /**
- * Console transports: JSON lines to stdout (production, container platforms), human-friendly
- * "pretty" lines (development), and the stderr fallback.
+ * Console transports: the `stdout` and `stderr` channels (for containers, where the platform
+ * collects the streams), and the stderr fallback every sink uses when its own transport fails.
+ *
+ * v1's `pretty` console format is gone: the `line` format is readable in a terminal and in a file
+ * alike (`LOG_FORMAT=pretty` still reads as `line`, with a warning).
  *
  * @module
  */
 import type { Batch, Transport, WritableLike } from './types.ts'
 
-/** JSON lines to a stream (default `process.stdout`). */
-export function stdoutTransport(stream: WritableLike = process.stdout): Transport {
+/**
+ * Write batches to a stream as they are (lines in the channel's format).
+ *
+ * @param name the transport name, shown in fallback warnings
+ *
+ * @example
+ * streamTransport('stderr', process.stderr)
+ */
+export function streamTransport(name: string, stream: WritableLike): Transport {
   return {
-    name: 'stdout',
+    name,
     write(batch: Batch): Promise<void> {
       stream.write(batch.text)
       return Promise.resolve()
@@ -18,71 +28,23 @@ export function stdoutTransport(stream: WritableLike = process.stdout): Transpor
   }
 }
 
-/** A parsed NDJSON record (only the keys the formatter reads are declared). */
-interface ParsedLine {
-  time?: unknown
-  level?: unknown
-  msg?: unknown
-  fields?: unknown
-  err?: unknown
-  [key: string]: unknown
-}
-
-const LEVEL_LABEL: Readonly<Record<string, string>> = {
-  trace: 'TRACE',
-  debug: 'DEBUG',
-  info: 'INFO ',
-  warn: 'WARN ',
-  error: 'ERROR',
-  fatal: 'FATAL',
-}
-
 /**
- * Format one NDJSON line for humans: `12:03:04.567 INFO  Invoice sent {"invoiceId":"…"}`.
- * Unparseable lines are passed through unchanged (they're already safe, escaped JSON).
+ * The `stdout` channel's transport (default stream: `process.stdout`).
+ *
+ * @example
+ * createPipelineLogger({ transport: stdoutTransport() })
  */
-export function prettyLine(line: string): string {
-  let rec: ParsedLine
-  try {
-    rec = JSON.parse(line) as ParsedLine
-  } catch {
-    return line
-  }
-  const time = typeof rec.time === 'string' ? rec.time.slice(11, 23) : ''
-  const label = LEVEL_LABEL[String(rec.level)] ?? String(rec.level)
-  const ids = ['requestId', 'traceId', 'tenantId', 'actorId']
-    .filter((k) => typeof rec[k] === 'string')
-    .map((k) => `${k}=${String(rec[k])}`)
-  const extra: Record<string, unknown> & { err?: unknown } = {}
-  if (rec.fields && typeof rec.fields === 'object') Object.assign(extra, rec.fields)
-  if (rec.err) extra.err = rec.err
-  const tail = Object.keys(extra).length > 0 ? ` ${JSON.stringify(extra)}` : ''
-  const idText = ids.length > 0 ? ` (${ids.join(' ')})` : ''
-  // Messages are re-escaped through JSON.stringify, so control characters can't reach the terminal.
-  const msg = JSON.stringify(String(rec.msg ?? '')).slice(1, -1)
-  return `${time} ${label} ${msg}${idText}${tail}`
-}
-
-/** Human-friendly lines to a stream (default `process.stdout`). For local development. */
-export function prettyTransport(stream: WritableLike = process.stdout): Transport {
-  return {
-    name: 'pretty',
-    write(batch: Batch): Promise<void> {
-      const out = batch.text
-        .split('\n')
-        .filter((l) => l.length > 0)
-        .map(prettyLine)
-        .join('\n')
-      stream.write(`${out}\n`)
-      return Promise.resolve()
-    },
-    close: () => Promise.resolve(),
-  }
+export function stdoutTransport(stream: WritableLike = process.stdout): Transport {
+  return streamTransport('stdout', stream)
 }
 
 /**
- * The fallback transport, used when the primary fails. It must be the most boring code in the
- * package: it never rejects and never throws, whatever the stream does.
+ * The fallback transport, used when a channel's transport fails, and the `stderr` channel. It must
+ * be the most boring code in the package: it never rejects and never throws, whatever the stream
+ * does (there is nowhere left to report to).
+ *
+ * @example
+ * createPipelineLogger({ transport: fileTransport({ dir }), fallback: stderrTransport() })
  */
 export function stderrTransport(stream: WritableLike = process.stderr): Transport {
   return {

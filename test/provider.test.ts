@@ -15,19 +15,16 @@ afterEach(async () => {
 
 async function boot(env: string, logging: Record<string, unknown> = {}) {
   vi.stubEnv('APP_ENV', env)
+  vi.stubEnv('LOG_FORMAT', 'json')
   const root = await mkdtemp(join(tmpdir(), 'sv-logs-'))
   dirs.push(root)
   const app = createApp({
     config: {
       app: { root },
       logging: {
-        driver: 'file',
+        default: 'stack',
         path: 'storage/logs',
-        maxDailySize: '5MB',
-        retentionDays: 7,
-        level: 'info',
-        format: 'json',
-        enabled: true,
+        channels: { daily: { driver: 'daily', maxFileSize: '5mb', days: 7, level: 'info' } },
         requests: { ignore: ['/health'], slowThresholdMs: 1000 },
         viewer: { enabled: true, path: '/_strutvane/logs' },
         ...logging,
@@ -91,11 +88,7 @@ describe('@strutvane/logs/provider', () => {
     const off = await boot('local', { viewer: { enabled: false } })
     expect(await off.request('/_strutvane/logs')).toBeUndefined()
     await off.app.shutdown()
-    const disabled = await boot('local', {
-      enabled: false,
-      path: undefined,
-      maxDailySize: undefined,
-    })
+    const disabled = await boot('local', { default: 'null' })
     expect(disabled.app.make(LoggerToken).isLevelEnabled('info')).toBe(false)
     await disabled.app.shutdown()
   })
@@ -103,7 +96,7 @@ describe('@strutvane/logs/provider', () => {
   test('works with no logging config at all (env defaults)', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sv-logs-'))
     dirs.push(root)
-    vi.stubEnv('LOGS_DRIVER', 'stdout')
+    vi.stubEnv('LOG_CHANNEL', 'stdout')
     vi.stubEnv('LOGS_VIEWER', 'false')
     const app = createApp({ config: {}, providers: [createLogsProvider()] })
     await app.boot()

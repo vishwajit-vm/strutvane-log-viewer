@@ -85,12 +85,13 @@ describe('provider: viewer access pass-through', () => {
     options: LogsProviderOptions = {},
   ) {
     vi.stubEnv('APP_ENV', env)
+    vi.stubEnv('LOG_FORMAT', 'json')
     const root = await mkdtemp(join(tmpdir(), 'sv-logs-'))
     dirs.push(root)
     const app = createApp({
       config: {
         app: { root },
-        logging: { driver: 'file', path: 'storage/logs', viewer: { enabled: true, ...viewer } },
+        logging: { path: 'storage/logs', viewer: { enabled: true, ...viewer } },
       },
       providers: [createLogsProvider(options)],
     })
