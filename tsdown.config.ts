@@ -9,6 +9,7 @@ export default defineConfig({
     express: 'src/adapters/express.ts',
     viewer: 'src/viewer/index.ts',
     provider: 'src/provider.ts',
+    commands: 'src/commands/index.ts',
   },
   format: 'esm',
   platform: 'node',

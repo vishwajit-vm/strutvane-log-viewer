@@ -53,6 +53,10 @@
       "types": "./dist/provider.d.mts",
       "default": "./dist/provider.mjs"
     },
+    "./commands": {
+      "types": "./dist/commands.d.mts",
+      "default": "./dist/commands.mjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [
