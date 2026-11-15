@@ -338,7 +338,10 @@ describe('SSRF-safe HTTP', () => {
       lookup: async () => [{ address: '127.0.0.1', family: 4 }],
       timeoutMs: 300,
     }
-    await safePost(`https://hooks.test:${port}/hook?x=1`, '{"text":"hi"}', options)
+    // Answers that should arrive get a generous deadline, so a busy machine can't fail them; only
+    // the hang and trickle cases below rely on the short one.
+    const patient = { ...options, timeoutMs: 10_000 }
+    await safePost(`https://hooks.test:${port}/hook?x=1`, '{"text":"hi"}', patient)
     expect(seen[0]).toEqual({
       method: 'POST',
       url: '/hook?x=1',
@@ -346,7 +349,7 @@ describe('SSRF-safe HTTP', () => {
       type: 'application/json',
     })
     status = 500
-    await expect(safePost(`https://hooks.test:${port}/hook`, '{}', options)).rejects.toThrow(
+    await expect(safePost(`https://hooks.test:${port}/hook`, '{}', patient)).rejects.toThrow(
       'HTTP 500',
     )
     trickle = true
