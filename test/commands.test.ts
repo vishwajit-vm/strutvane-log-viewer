@@ -347,10 +347,12 @@ describe('command adapters', () => {
     )
     const env = { LOG_PATH: d }
     const a = io({ env })
-    expect(await logTailCommand.run(['-n', '5', '--level=warn'], a.io)).toBe(0)
+    expect(await logTailCommand.run(['-n', '5', '--level=warn', '--no-follow'], a.io)).toBe(0)
     expect(a.stdout.text()).toBe('[2026-11-15 10:00:02.000] production.ERROR: bad\\u001b[31m {}\n')
     const b = io({ env })
-    expect(await logTailCommand.run(['--filter', 'HELLO', '--channel', 'daily'], b.io)).toBe(0)
+    expect(
+      await logTailCommand.run(['--grep', 'HELLO', '--channel', 'daily', '--no-follow'], b.io),
+    ).toBe(0)
     expect(b.stdout.text()).toContain('local.INFO: hello')
     const c = io({ env })
     expect(await logTailCommand.run(['--level=loud'], c.io)).toBe(1)

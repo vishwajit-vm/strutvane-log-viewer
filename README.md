@@ -150,12 +150,12 @@ Files are ordered with `compareLogFiles` (base, day, process, part number), neve
 `@strutvane/logs/commands` exports `log:tail`, `log:list` and `log:clear` for the `node strut` command registry (pure functions plus a thin adapter: `command.run(argv, { stdout, stderr, config })`).
 
 ```bash
-node strut log:tail [--level=warning] [--channel=payments] [--filter=text] [-n 50] [-f]
+node strut log:tail [--level=warning] [--channel=payments] [--grep=text] [--since=15m] [-n 50] [--no-follow]
 node strut log:list [--channel=payments]
 node strut log:clear [--days=7] [--channel=payments] [--force]
 ```
 
-- `log:tail` shows the last records and, with `-f`, new ones as they arrive. It reads both formats and merges the per-process files by timestamp. Output is re-redacted and printed in the `line` format, so a hostile log line can't drive your terminal.
+- `log:tail` shows the last records, then new ones as they arrive until Ctrl+C (`--follow` is the default; `--no-follow` prints and exits). `--since` takes a duration (`30s`, `15m`, `2h`, `7d`) or a date or time. It reads both formats and merges the per-process files by timestamp. Output is re-redacted and printed in the `line` format, so a hostile log line can't drive your terminal.
 - `log:list` shows every file with its size and day, and totals per day.
 - `log:clear` deletes files, keeping the last `--days` days if given; files a running process may still write, and daily files dated today or later, are kept and listed. Deleting can't be undone, so it asks first in a terminal; without a terminal (CI, scripts, containers) it refuses unless you pass `--force`. The function behind it, `clearLogs(sources, { confirm: true, days })`, requires `confirm: true` for the same reason.
 

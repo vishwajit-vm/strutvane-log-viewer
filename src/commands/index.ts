@@ -4,7 +4,7 @@
  * any CLI can call `command.run(argv, io)`.
  *
  * ```
- * node strut log:tail [--level=warning] [--channel=payments] [--filter=text] [-n 50] [-f]
+ * node strut log:tail [--level=warning] [--channel=payments] [--grep=text] [--since=15m] [-n 50] [--no-follow]
  * node strut log:list [--channel=payments]
  * node strut log:clear [--days=N] [--channel=payments] [--force]
  * ```
@@ -22,14 +22,14 @@ import { toLevel } from '../levels.ts'
 import type { WritableLike } from '../transports/types.ts'
 import { clearLogs, formatLogList, listLogs } from './list.ts'
 import { type LogSource, sourcesFor } from './sources.ts'
-import { formatTailEntry, tailLogs } from './tail.ts'
+import { formatTailEntry, parseSince, tailLogs } from './tail.ts'
 
 export type { ClearLogsOptions, ClearLogsResult, ListedFile, LogListing } from './list.ts'
 export { ClearNotConfirmedError, clearLogs, formatLogList, humanSize, listLogs } from './list.ts'
 export type { LogSource } from './sources.ts'
 export { LogSourceError, sourcesFor } from './sources.ts'
 export type { TailEntry, TailFilter, TailLogsOptions } from './tail.ts'
-export { formatTailEntry, matchesTail, mergeByTime, tailLogs } from './tail.ts'
+export { formatTailEntry, matchesTail, mergeByTime, parseSince, tailLogs } from './tail.ts'
 
 /** What a command needs from its host. */
 export interface CommandIO {
@@ -113,11 +113,13 @@ function wholeNumber(value: string | undefined, name: string, fallback: number):
 }
 
 /**
- * `log:tail`: the last records and, with `--follow`, new ones as they arrive, merged across
- * processes by timestamp.
+ * `log:tail`: the last records, then new ones as they arrive (until Ctrl+C), merged across
+ * processes by timestamp. Flags as in the blueprint (CONSISTENCY-2026-11-15 #39): `--level=`,
+ * `--channel=`, `--grep=`, `--since=` and `--follow`, which is the default (`--no-follow` prints
+ * the backlog and exits).
  *
  * @example
- * await logTailCommand.run(['--level=error', '-n', '50'], { stdout: process.stdout, stderr: process.stderr })
+ * await logTailCommand.run(['--level=error', '--since=1h', '--no-follow'], { stdout: process.stdout, stderr: process.stderr })
  */
 export const logTailCommand: LogCommand = {
   name: 'log:tail',
@@ -126,23 +128,32 @@ export const logTailCommand: LogCommand = {
     'Usage: node strut log:tail [options]',
     '  --level=<level>     only this level and above (debug … emergency; warn/fatal/trace work)',
     '  --channel=<name>    only the files of this channel (a stack: all of its file channels)',
-    '  --filter=<text>     only records containing this text (case-insensitive)',
+    '  --grep=<text>       only records containing this text (case-insensitive)',
+    '  --since=<when>      only records since a duration ago (30s, 15m, 2h, 7d) or a date/time',
     '  -n, --lines=<n>     records to show first (default 20)',
-    '  -f, --follow        keep showing new records until Ctrl+C',
+    '  -f, --follow        keep showing new records until Ctrl+C (the default)',
+    '  --no-follow         print the latest records and exit',
   ].join('\n'),
   run(argv, io) {
     return guarded(this, io, async () => {
       const { values } = parseArgs({
         args: [...argv],
         strict: true,
+        allowNegative: true,
         options: {
           level: { type: 'string' },
           channel: { type: 'string' },
-          filter: { type: 'string' },
+          grep: { type: 'string' },
+          since: { type: 'string' },
           lines: { type: 'string', short: 'n' },
-          follow: { type: 'boolean', short: 'f' },
+          follow: { type: 'boolean', short: 'f', default: true },
         },
       })
+      const since = values.since === undefined ? undefined : parseSince(values.since)
+      if (values.since !== undefined && since === undefined)
+        throw new UsageError(
+          `--since="${values.since}" is not a duration (30s, 15m, 2h, 7d) or a date such as 2026-11-15`,
+        )
       const level = values.level === undefined ? undefined : toLevel(values.level)
       if (values.level !== undefined && level === undefined)
         throw new UsageError(
@@ -151,9 +162,10 @@ export const logTailCommand: LogCommand = {
       const entries = tailLogs({
         sources: sources(io, values.channel),
         lines: wholeNumber(values.lines, 'lines', 20),
-        follow: values.follow === true,
+        follow: values.follow !== false,
         ...(level === undefined ? {} : { level }),
-        ...(values.filter === undefined ? {} : { text: values.filter }),
+        ...(values.grep === undefined ? {} : { text: values.grep }),
+        ...(since === undefined ? {} : { since }),
         ...(io.signal ? { signal: io.signal } : {}),
         ...(io.pollMs === undefined ? {} : { pollMs: io.pollMs }),
       })

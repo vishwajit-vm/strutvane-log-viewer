@@ -7,7 +7,8 @@
  *   file (ADR-0015); reading them one after the other would show worker records out of order. The
  *   backlog is merged by timestamp, and so is everything that arrives within one poll.
  * - **Filters:** a minimum level (`--level=warning` shows warning and above; aliases work), a
- *   channel (its files, see `sourcesFor`), and case-insensitive text.
+ *   channel (its files, see `sourcesFor`), case-insensitive text (`--grep`), and a start time
+ *   (`--since=15m` or a date).
  * - **Safe output:** each record is re-sanitised and printed in the `line` format, which escapes
  *   every control character, so a hostile log line can't drive the terminal.
  * - **Bounded:** the backlog reads files backwards in chunks; each poll reads at most
@@ -32,6 +33,34 @@ export interface TailFilter {
   readonly level?: Level
   /** Case-insensitive text that must appear in the record. */
   readonly text?: string
+  /** Only records at or after this time (ISO 8601, UTC, as written in the files). */
+  readonly since?: string
+}
+
+const SINCE_UNITS: Readonly<Record<string, number>> = {
+  s: 1_000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+}
+
+/**
+ * Parse a `--since` value: a duration back from `now` (`30s`, `15m`, `2h`, `7d`) or a date or
+ * time (`2026-11-15`, `2026-11-15T10:00:00Z`). Returns the ISO instant, or `undefined` when the
+ * text is neither.
+ *
+ * @example
+ * parseSince('15m', Date.parse('2026-11-15T10:00:00Z')) // '2026-11-15T09:45:00.000Z'
+ */
+export function parseSince(text: string, now: number = Date.now()): string | undefined {
+  const duration = /^(\d{1,6})([smhd])$/.exec(text.trim())
+  if (duration?.[1] && duration[2]) {
+    const unit = SINCE_UNITS[duration[2]] ?? 0
+    return new Date(now - Number(duration[1]) * unit).toISOString()
+  }
+  if (!/^\d{4}-\d{2}-\d{2}/.test(text.trim())) return undefined
+  const ms = Date.parse(text.trim())
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined
 }
 
 /** One record found by the tail. */
@@ -66,6 +95,9 @@ export function matchesTail(record: ParsedRecord, filter: TailFilter): boolean {
   if (filter.level !== undefined) {
     const level = toLevel(record.level)
     if (level === undefined || LEVEL_PRIORITY[level] < LEVEL_PRIORITY[filter.level]) return false
+  }
+  if (filter.since !== undefined) {
+    if (typeof record.time !== 'string' || record.time < filter.since) return false
   }
   if (filter.text !== undefined && filter.text !== '') {
     let haystack: string
@@ -176,6 +208,7 @@ export async function* tailLogs(options: TailLogsOptions): AsyncGenerator<TailEn
   const filter: TailFilter = {
     ...(options.level === undefined ? {} : { level: options.level }),
     ...(options.text === undefined ? {} : { text: options.text }),
+    ...(options.since === undefined ? {} : { since: options.since }),
   }
   // Note every file's size first, so records written while the backlog is read are not lost.
   const followed = new Map<string, Followed>()
