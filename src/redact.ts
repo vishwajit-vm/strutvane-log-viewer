@@ -21,6 +21,7 @@
  *      - credentials in URLs (`redis://:secret@host` too, and passwords containing `:` or `@`)
  *      - webhook URLs whose path is the secret (Slack, Discord, Microsoft Teams)
  *      - secret query parameters (`?token=…`, `&sig=…`, `#access_token=…`)
+ *      - `password=…`, `api_key: …` and similar in free text (connection strings, driver errors)
  *      - well-known prefixed API keys (`sk_live_…`, `ghp_…`, `AKIA…`, `xoxb-…`, …)
  *      - PEM private keys
  *      - Luhn-valid card numbers
@@ -52,6 +53,7 @@ export type PatternRule =
   | 'urlCredentials'
   | 'webhook'
   | 'queryString'
+  | 'keyValue'
   | 'apiKey'
   | 'privateKey'
   | 'pan'
@@ -147,6 +149,19 @@ const PATTERNS: readonly PatternDef[] = [
     re: /([?&#;](?:[a-z0-9]+[_.-])*(?:token|signature|sig|key|apikey|code|password|passwd|pwd|passphrase|secret|credentials?|otp|totp|mfa|pin|jwt|sid|session|sessionid|auth))=([^&#\s"'<>]+)/gi,
     replace: (m) => `${m.slice(0, m.indexOf('=') + 1)}${REDACTED}`,
   },
+  // Secrets as `name=value` or `name: value` in free text: a libpq connection string
+  // (`host=db password=…`), a driver error (`invalid api_key: …`), a config dump, JSON inside a
+  // message. Only strong names (password, secret, token, api key, …) as the end of a word, so
+  // prose such as "password reset" or "token count" stays readable. A quoted value keeps its
+  // quotes; a value another rule already hid is left alone.
+  {
+    rule: 'keyValue',
+    re: /(?<![A-Za-z0-9_.-])(["']?[a-z0-9_.-]*?(?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)["']?\s{0,3}[=:]\s{0,3})(?!\[REDACTED)("[^"]*"|'[^']*'|[^\s,;&"'<>)\]}]+)/gi,
+    replace: (_m, head: string, value: string) => {
+      const quote = value.startsWith('"') || value.startsWith("'") ? value[0] : ''
+      return `${head}${quote}${REDACTED}${quote}`
+    },
+  },
   // Well-known API keys recognisable by their prefix (Strutvane, Stripe, GitHub, GitLab, npm,
   // Slack, AWS access key ids, Google API keys). Not glued to a preceding letter or digit.
   {
@@ -227,7 +242,13 @@ export function redactString(
   // Short strings can't contain the long patterns; skip the regexes for them (hot path). A short
   // query parameter (`?pin=1234`) still needs the query-string rule, hence the `=` check.
   const short = out.length < 13
-  if (!short || out.includes('eyJ') || out.includes('://') || out.includes('=')) {
+  if (
+    !short ||
+    out.includes('eyJ') ||
+    out.includes('://') ||
+    out.includes('=') ||
+    out.includes(':')
+  ) {
     for (const p of PATTERNS) {
       if (options.disable.has(p.rule)) continue
       p.re.lastIndex = 0

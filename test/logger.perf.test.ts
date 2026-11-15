@@ -90,6 +90,9 @@ test('redaction stays linear: hostile 8 KB strings cost milliseconds, not a bloc
     'Bearer '.repeat(1170),
     '4111 '.repeat(1638),
     `eyJ${'a.'.repeat(4090)}`,
+    'password:'.repeat(910), // the key=value rule
+    `password="${'a'.repeat(8180)}`,
+    'x_'.repeat(4096),
   ]
   for (const text of hostile) {
     const started = performance.now()
