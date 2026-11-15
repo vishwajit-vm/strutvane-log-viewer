@@ -105,6 +105,11 @@ export class BoundedQueue {
   push(item: QueueItem): PushResult {
     const important = item.priority >= IMPORTANT_PRIORITY
     let result: PushResult = 'queued'
+    if (item.bytes > this.limits.maxBytes) {
+      // It can never fit: drop it now, rather than evicting everything first and then dropping it.
+      this.count(item.level)
+      return 'dropped'
+    }
     while (this.size >= this.limits.maxRecords || this.bytes + item.bytes > this.limits.maxBytes) {
       if (this.size === 0 || !important) {
         // Empty but still too big, or a low record arriving at a full queue: drop the newcomer.
