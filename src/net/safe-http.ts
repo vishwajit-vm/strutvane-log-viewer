@@ -12,7 +12,8 @@
  *   IPv4 addresses embedded in IPv6 (`::ffff:10.0.0.1`, `64:ff9b::a00:1`);
  * - connects to exactly the address it checked (no second lookup that a rebinding DNS server
  *   could answer differently), while TLS still verifies the certificate for the real host name;
- * - never follows redirects, caps the time per request, and discards the response body.
+ * - never follows redirects, caps the time of the whole exchange (DNS included), and discards the
+ *   response body.
  *
  * It throws on refusal or failure; the caller (a log sink) turns that into its fallback.
  *
@@ -111,8 +112,13 @@ function blockedV6(ip: string): boolean {
     if (f === 0 && h === 0 && (i === 0 || i === 1)) return true
     return blockedV4(embedded)
   }
+  if (a === 0 && b === 0 && c === 0 && d === 0 && e === 0xffff && f === 0)
+    return blockedV4(embedded) // IPv4-translated ::ffff:0:a.b.c.d (RFC 2765)
   if (a === 0x64 && b === 0xff9b && c === 0 && d === 0 && e === 0 && f === 0)
     return blockedV4(embedded) // NAT64
+  if (a === 0x64 && b === 0xff9b && c === 1) return true // local-use NAT64 64:ff9b:1::/48 (RFC 8215)
+  if (a === 0x2001 && b === 0) return true // Teredo 2001::/32: tunnels to an IPv4 address
+  if (a === 0x0100 && b === 0 && c === 0 && d === 0) return true // discard-only 100::/64
   if ((a & 0xfe00) === 0xfc00) return true // unique local fc00::/7 (incl. fd00:ec2::254 metadata)
   if ((a & 0xffc0) === 0xfe80) return true // link-local fe80::/10
   if ((a & 0xffc0) === 0xfec0) return true // site-local (deprecated) fec0::/10
@@ -192,6 +198,24 @@ export async function vetUrl(
   }
 }
 
+/** Settle with `work`, or reject with `error()` once `ms` have passed (whichever comes first). */
+function withDeadline<T>(work: Promise<T>, ms: number, error: () => Error): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(error()), ms)
+    timer.unref()
+    work.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (reason: unknown) => {
+        clearTimeout(timer)
+        reject(reason)
+      },
+    )
+  })
+}
+
 /**
  * POST `body` to `url` safely (see the module notes). Resolves when the server answered 2xx.
  *
@@ -205,8 +229,17 @@ export async function safePost(
   body: string,
   options: SafePostOptions = {},
 ): Promise<void> {
-  const target = await vetUrl(url, options.lookup, options.isBlocked)
   const timeoutMs = options.timeoutMs ?? 5_000
+  const timedOut = (): Error => new Error(`webhook timed out after ${timeoutMs} ms`)
+  // One deadline for the whole exchange, DNS resolution included: a resolver that never answers
+  // must not hold the channel's sink any longer than a server that never answers.
+  const startedAt = performance.now()
+  const target = await withDeadline(
+    vetUrl(url, options.lookup, options.isBlocked),
+    timeoutMs,
+    timedOut,
+  )
+  const remainingMs = Math.max(1, timeoutMs - (performance.now() - startedAt))
   const send = options.request ?? httpsRequest
   const payload = Buffer.from(body, 'utf8')
   const requestOptions: RequestOptions = {
@@ -229,10 +262,9 @@ export async function safePost(
     agent: false,
   }
   await new Promise<void>((resolvePost, rejectPost) => {
-    const timedOut = (): Error => new Error(`webhook timed out after ${timeoutMs} ms`)
     // `timeout` above only catches an idle socket; this caps the whole exchange, so a server that
     // trickles an endless body can't hold the channel's sink forever.
-    const deadline = setTimeout(() => req.destroy(timedOut()), timeoutMs)
+    const deadline = setTimeout(() => req.destroy(timedOut()), remainingMs)
     deadline.unref()
     const settle = (error?: Error): void => {
       clearTimeout(deadline)
