@@ -455,13 +455,13 @@ describe('reading records', () => {
     expect(page.records.length + rest.records.length).toBe(6)
   })
 
-  test('a cursor naming a deleted file continues with older files', async () => {
+  test('a cursor naming a day that is gone continues with older days', async () => {
     const dir = fixture()
     const page = await readPage({
       dir,
       query: {},
       limit: 100,
-      cursor: { file: 'strutvane-2026-11-14.worker-9.log', before: 3 },
+      cursor: { group: '2026-11-15', positions: [['strutvane-2026-11-15.worker-9.log', 3]] },
     })
     expect(page.records.map((r) => r.msg)).toEqual([
       'foreign',
@@ -474,10 +474,8 @@ describe('reading records', () => {
   })
 
   test('cursors are validated: traversal, wrong shapes and oversized values are rejected', () => {
-    expect(decodeCursor(encodeCursor({ file: 'strutvane-2026-11-14.log', before: 3 }))).toEqual({
-      file: 'strutvane-2026-11-14.log',
-      before: 3,
-    })
+    const cursor = { group: '2026-11-14', positions: [['strutvane-2026-11-14.log', 3]] as const }
+    expect(decodeCursor(encodeCursor(cursor))).toEqual(cursor)
     const enc = (v: unknown): string => Buffer.from(JSON.stringify(v)).toString('base64url')
     for (const bad of [
       enc(['../../etc/passwd', 1]),

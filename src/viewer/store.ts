@@ -16,13 +16,25 @@
  *   read backwards in fixed-size chunks from the cursor, never whole, so memory stays flat however
  *   large a file grows. A line longer than any record this logger writes is skipped unread.
  * - **Partial last lines are ignored** (a writer may be mid-append).
+ * - **Processes are merged by time** (ADR-0022 §6): within a day, the main process's and every
+ *   worker's files are read side by side and the newest record wins, so a page is in true time
+ *   order across processes. The opaque cursor remembers where each process stopped.
  *
  * @module
  */
 import { createReadStream } from 'node:fs'
+import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
-import { compareLogFiles, DEFAULT_BASES, listLogFiles, parseLogFileName } from '../files.ts'
+import {
+  compareLogFiles,
+  DEFAULT_BASES,
+  isDayKey,
+  type LogFileName,
+  listLogFiles,
+  parseLogFileName,
+  streamKey,
+} from '../files.ts'
 import { parseLogLine } from '../format/parse.ts'
 import {
   describeFiles,
@@ -45,27 +57,69 @@ import {
   type ViewerRecord,
 } from './filters.ts'
 
-/** Where to continue paging: the lines of `file` that start before byte offset `before`. */
+/**
+ * Where to continue paging. Records are read one group at a time, newest group first (each UTC
+ * day, then the `single` files, which span days), and inside a group every writer stream (the
+ * main process and each worker, ADR-0015) is merged by timestamp. The cursor names the group and,
+ * for each stream that still has records, the file and byte offset to continue at: the lines of
+ * `file` that start before `before`. A stream of that group the cursor doesn't name is done (or
+ * started after the page was read, so it only holds newer records).
+ */
 export interface Cursor {
-  readonly file: string
-  readonly before: number
+  /** `YYYY-MM-DD` for daily files, `single` for single files. */
+  readonly group: string
+  /** `[file, before]` for each stream of the group that still has records. */
+  readonly positions: ReadonlyArray<readonly [file: string, before: number]>
+}
+
+const CURSOR_VERSION = 1
+/** Bounds for a decoded cursor: enough for any real directory, small enough to parse cheaply. */
+const MAX_CURSOR_CHARS = 16_384
+const MAX_CURSOR_POSITIONS = 512
+const SINGLE_GROUP = 'single'
+
+/** The group a log file belongs to: its day, or `single`. */
+function groupOf(name: LogFileName): string {
+  return name.day ?? SINGLE_GROUP
 }
 
 /** Encode a cursor as an opaque URL-safe string. */
 export function encodeCursor(cursor: Cursor): string {
-  return Buffer.from(JSON.stringify([cursor.file, cursor.before])).toString('base64url')
+  return Buffer.from(JSON.stringify([CURSOR_VERSION, cursor.group, cursor.positions])).toString(
+    'base64url',
+  )
 }
 
-/** Decode a cursor, or `undefined` if it is malformed or names something that isn't a log file. */
+/**
+ * Decode a cursor, or `undefined` if it is malformed: wrong shape or version, a group that is
+ * neither a day nor `single`, a name that isn't a log file of that group, two positions for one
+ * stream, or a negative or fractional offset.
+ */
 export function decodeCursor(value: string): Cursor | undefined {
-  if (value.length > 512 || !/^[A-Za-z0-9_-]+$/.test(value)) return undefined
+  if (value.length > MAX_CURSOR_CHARS || !/^[A-Za-z0-9_-]+$/.test(value)) return undefined
   try {
     const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
-    if (!Array.isArray(parsed) || parsed.length !== 2) return undefined
-    const [file, before] = parsed as [unknown, unknown]
-    if (typeof file !== 'string' || parseLogFileName(file) === undefined) return undefined
-    if (typeof before !== 'number' || !Number.isInteger(before) || before < 0) return undefined
-    return { file, before }
+    if (!Array.isArray(parsed) || parsed.length !== 3 || parsed[0] !== CURSOR_VERSION)
+      return undefined
+    const [, group, list] = parsed as [unknown, unknown, unknown]
+    if (typeof group !== 'string' || (group !== SINGLE_GROUP && !isDayKey(group))) return undefined
+    if (!Array.isArray(list) || list.length > MAX_CURSOR_POSITIONS) return undefined
+    const positions: Array<readonly [string, number]> = []
+    const streams = new Set<string>()
+    for (const item of list) {
+      if (!Array.isArray(item) || item.length !== 2) return undefined
+      const [file, before] = item as [unknown, unknown]
+      if (typeof file !== 'string') return undefined
+      const name = parseLogFileName(file)
+      if (name === undefined || groupOf(name) !== group) return undefined
+      if (typeof before !== 'number' || !Number.isSafeInteger(before) || before < 0)
+        return undefined
+      const stream = streamKey(name)
+      if (streams.has(stream)) return undefined
+      streams.add(stream)
+      positions.push([file, before])
+    }
+    return { group, positions }
   } catch {
     return undefined
   }
@@ -134,54 +188,224 @@ export interface Page {
   readonly scanned: number
 }
 
-/** Read one page of matching records, newest first. */
+/**
+ * One writer stream inside a group: its files newest first, read backwards one line at a time,
+ * with the next record ready (`head`) so streams can be merged by time.
+ */
+interface StreamReader {
+  readonly dir: string
+  /** The stream's files in this group, newest first. */
+  readonly files: readonly string[]
+  /** Index of the file being read. */
+  index: number
+  /** Read the current file only below this offset (from the cursor); `undefined`: all of it. */
+  end: number | undefined
+  lines: AsyncGenerator<FileLine> | undefined
+  /** The next record, read but not yet consumed. */
+  head: { readonly line: FileLine; readonly clean: CleanRecord; readonly time: string } | undefined
+  /** Offset in the current file below which nothing is consumed yet; `undefined`: nothing read. */
+  resume: number | undefined
+  done: boolean
+}
+
+/** Byte offset just after a line (past its newline): reading below it yields that line again. */
+const after = (line: FileLine): number => line.end + 1
+
+/** Close a reader's open file. */
+async function closeReader(r: StreamReader): Promise<void> {
+  const lines = r.lines
+  r.lines = undefined
+  await lines?.return(undefined)
+}
+
+/**
+ * The work budget of one page. `progress` turns true once the page has consumed something (a
+ * record, or an unparseable line it skipped): only then may the budget stop the page. Before that,
+ * every stream must be primed with its next record so the merge picks the true newest one, even
+ * when there are more streams than the budget allows lines; otherwise a small budget would
+ * re-read the same heads on every page and never move on.
+ */
+interface Budget {
+  scanned: number
+  readonly max: number
+  progress: boolean
+}
+
+/**
+ * Advance a reader to its next parseable record (unparseable lines are skipped). Every line read
+ * counts against the budget; returns `false` when the budget ran out before a record was found.
+ */
+async function fill(r: StreamReader, sanitize: Sanitizer, budget: Budget): Promise<boolean> {
+  while (!r.done && r.head === undefined) {
+    if (budget.scanned >= budget.max && budget.progress) return false
+    const file = r.files[r.index]
+    if (file === undefined) {
+      r.done = true
+      break
+    }
+    r.lines ??= readLinesBackward(join(r.dir, file), r.end)
+    const next = await r.lines.next()
+    if (next.done) {
+      await closeReader(r)
+      r.index++
+      r.end = undefined
+      r.resume = undefined
+      continue
+    }
+    budget.scanned++
+    const clean = cleanLine(next.value.text, sanitize)
+    if (clean === undefined) {
+      r.resume = next.value.start
+      budget.progress = true
+      continue
+    }
+    const time = typeof clean.record.time === 'string' ? clean.record.time : ''
+    r.head = { line: next.value, clean, time }
+  }
+  return true
+}
+
+/** The reader whose next record is the newest (ties: the later file, then the first reader). */
+function newest(readers: readonly StreamReader[]): StreamReader | undefined {
+  let best: StreamReader | undefined
+  for (const r of readers) {
+    if (!r.head) continue
+    if (!best?.head) {
+      best = r
+      continue
+    }
+    if (r.head.time > best.head.time) best = r
+    else if (r.head.time === best.head.time) {
+      const a = r.files[r.index] ?? ''
+      const b = best.files[best.index] ?? ''
+      if (compareLogFiles(a, b) > 0) best = r
+    }
+  }
+  return best
+}
+
+/** Where a reader continues: its current file and the offset below which nothing is consumed. */
+async function positionOf(r: StreamReader): Promise<readonly [string, number] | undefined> {
+  if (r.done) return undefined
+  const file = r.files[r.index]
+  if (file === undefined) return undefined
+  if (r.head) return [file, after(r.head.line)]
+  if (r.resume !== undefined) return [file, r.resume]
+  if (r.end !== undefined) return [file, r.end]
+  // Not opened yet: everything it holds now (later appends are newer than this page).
+  try {
+    return [file, (await stat(join(r.dir, file))).size]
+  } catch {
+    return [file, 0]
+  }
+}
+
+/**
+ * Read one page of matching records, newest first, merged across every writer stream by
+ * timestamp (ADR-0022 §6): the main process and each worker write their own files, and a page
+ * shows their records interleaved in time order, not one process after another.
+ *
+ * Groups are read newest first (each UTC day, then the `single` files). Inside a group, each
+ * stream's files are read backwards from the newest and the newest head record wins, so the
+ * order is exact whenever each stream's own records are in time order (they are: one process
+ * appends them in order).
+ */
 export async function readPage(options: PageOptions): Promise<Page> {
   const { dir, query, scope, limit, cursor } = options
-  const maxScan = options.maxScanLines ?? 100_000
   const sanitize = options.sanitize ?? viewerSanitizer
+  const budget: Budget = { scanned: 0, max: options.maxScanLines ?? 100_000, progress: false }
   const range = dayRange(query)
-  const files = (await listLogFiles(dir, options.bases ?? DEFAULT_BASES))
-    .reverse()
-    .filter((name) => {
-      const day = parseLogFileName(name)?.day
-      // A single file spans days, so the range can't skip it.
-      if (day === undefined) return cursor === undefined || compareLogFiles(name, cursor.file) <= 0
-      if (range.from !== undefined && day < range.from) return false
-      if (range.to !== undefined && day > range.to) return false
-      // Continue at the cursor's file, or the next older one if it was deleted.
-      return cursor === undefined || compareLogFiles(name, cursor.file) <= 0
-    })
+
+  // group → stream → files (newest first)
+  const groups = new Map<string, Map<string, string[]>>()
+  for (const name of await listLogFiles(dir, options.bases ?? DEFAULT_BASES)) {
+    const parsed = parseLogFileName(name)
+    if (!parsed) continue
+    const day = parsed.day
+    if (day !== undefined) {
+      if (range.from !== undefined && day < range.from) continue
+      if (range.to !== undefined && day > range.to) continue
+    }
+    const group = groupOf(parsed)
+    let streams = groups.get(group)
+    if (!streams) {
+      streams = new Map()
+      groups.set(group, streams)
+    }
+    const key = streamKey(parsed)
+    streams.set(key, [name, ...(streams.get(key) ?? [])]) // listed oldest first → newest first
+  }
+  // Newest group first: days descending, then the single files.
+  const rank = (g: string): string => (g === SINGLE_GROUP ? '' : g)
+  let order = [...groups.keys()].sort((a, b) =>
+    rank(a) < rank(b) ? 1 : rank(a) > rank(b) ? -1 : 0,
+  )
+  if (cursor) order = order.filter((g) => rank(g) <= rank(cursor.group))
 
   const records: ViewerRecord[] = []
-  let scanned = 0
-  for (const name of files) {
-    const end = cursor && name === cursor.file ? cursor.before : undefined
-    const lines = readLinesBackward(join(dir, name), end)
-    // Start of the line examined last: everything before it is still to do.
-    let resumeAt = end
+  for (const [gi, group] of order.entries()) {
+    const resumeHere = cursor !== undefined && group === cursor.group
+    const readers: StreamReader[] = []
+    for (const files of groups.get(group)?.values() ?? []) {
+      let index = 0
+      let end: number | undefined
+      if (resumeHere) {
+        const at = cursor.positions.find(([file]) => files.includes(file))
+        if (!at) continue // that stream was finished on an earlier page
+        index = files.indexOf(at[0])
+        end = at[1]
+      }
+      readers.push({
+        dir,
+        files,
+        index,
+        end,
+        lines: undefined,
+        head: undefined,
+        resume: undefined,
+        done: false,
+      })
+    }
     try {
-      for await (const line of lines) {
-        if (scanned >= maxScan) {
-          const before = resumeAt ?? line.start + Buffer.byteLength(line.text) + 1
-          return { records, scanned, nextCursor: encodeCursor({ file: name, before }) }
+      let stopped = false
+      for (const r of readers) {
+        if (!(await fill(r, sanitize, budget))) {
+          stopped = true
+          break
         }
-        scanned++
-        resumeAt = line.start
-        const clean = cleanLine(line.text, sanitize)
-        if (!clean || !accept(clean, query, scope)) continue
-        records.push(clean.record)
-        if (records.length >= limit) {
-          const more = line.start > 0 || name !== files[files.length - 1]
-          return more
-            ? { records, scanned, nextCursor: encodeCursor({ file: name, before: line.start }) }
-            : { records, scanned }
+      }
+      while (!stopped) {
+        const r = newest(readers)
+        if (!r?.head) break
+        const { clean, line } = r.head
+        r.head = undefined
+        r.resume = line.start
+        budget.progress = true
+        if (accept(clean, query, scope)) records.push(clean.record)
+        if (!(await fill(r, sanitize, budget))) stopped = true
+        else if (records.length >= limit) {
+          const more = readers.some((x) => x.head !== undefined) || gi < order.length - 1
+          if (!more) return { records, scanned: budget.scanned }
+          stopped = true
+        }
+      }
+      if (stopped) {
+        const positions: Array<readonly [string, number]> = []
+        for (const x of readers) {
+          const p = await positionOf(x)
+          if (p) positions.push(p)
+        }
+        return {
+          records,
+          scanned: budget.scanned,
+          nextCursor: encodeCursor({ group, positions }),
         }
       }
     } finally {
-      await lines.return(undefined)
+      for (const r of readers) await closeReader(r)
     }
   }
-  return { records, scanned }
+  return { records, scanned: budget.scanned }
 }
 
 /**

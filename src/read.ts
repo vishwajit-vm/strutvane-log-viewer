@@ -72,6 +72,12 @@ const MAX_LINE_BYTES = 1024 * 1024
 export interface FileLine {
   readonly text: string
   readonly start: number
+  /**
+   * Byte offset of the line's terminating newline (its exclusive end). Reading the file below
+   * `end + 1` yields this line again: the exact resume point, even when the bytes were not valid
+   * UTF-8 and `text` has a different byte length.
+   */
+  readonly end: number
 }
 
 /**
@@ -108,7 +114,11 @@ export async function* readLinesBackward(
       let nl = data.lastIndexOf(0x0a, lineEnd - 1)
       while (nl !== -1) {
         if (!first && !oversized && lineEnd - nl - 1 <= MAX_LINE_BYTES)
-          yield { text: data.subarray(nl + 1, lineEnd).toString('utf8'), start: from + nl + 1 }
+          yield {
+            text: data.subarray(nl + 1, lineEnd).toString('utf8'),
+            start: from + nl + 1,
+            end: from + lineEnd,
+          }
         first = false
         oversized = false
         lineEnd = nl
@@ -121,7 +131,8 @@ export async function* readLinesBackward(
       }
       pos = from
     }
-    if (!first && !oversized && tail.length > 0) yield { text: tail.toString('utf8'), start: 0 }
+    if (!first && !oversized && tail.length > 0)
+      yield { text: tail.toString('utf8'), start: 0, end: tail.length }
   } catch {
     // Deleted or unreadable meanwhile: nothing more from this file.
   } finally {

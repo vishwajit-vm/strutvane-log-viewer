@@ -230,6 +230,8 @@ export default { fetch: (request: Request) => requests.handle(request, (r) => ap
 
 Every request gets one line like `GET /invoices/:id 200` with `{ method, route, status, durationMs, size }`. Server errors log at `error`, slow requests (over 1 s) and aborted ones at `warning`, and `/health` and `/ready` are skipped. The request id comes from a safe incoming `x-request-id` header, or a new UUID, and is echoed back in the response.
 
+The viewer's record list reads both formats and merges every process's files by timestamp, newest first: the web process, queue workers and cluster workers each write their own file (`…worker-2.log`), and one incident reads in the order it happened. Paging is exact: a page continues where the last one stopped, per process, and records written meanwhile never slip into older pages.
+
 ### Who can open the viewer
 
 | Situation | Access |
