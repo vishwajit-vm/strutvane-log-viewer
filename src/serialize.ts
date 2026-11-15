@@ -20,8 +20,46 @@ const BACKSLASH = String.fromCharCode(0x5c)
 /** Default maximum size of one record, in bytes (RFC-0004 §6). */
 export const DEFAULT_MAX_RECORD_BYTES: number = 32 * 1024
 
-function safeSlice(msg: unknown): string {
-  return typeof msg === 'string' ? msg.slice(0, 1024) : '[non-string message]'
+/**
+ * The smallest accepted record cap. A truncation marker (timestamp, level, the start of the
+ * message and `{"truncated":true,"originalBytes":N}`) must always fit, so smaller caps are refused.
+ */
+export const MIN_RECORD_BYTES = 1024
+
+/** Characters of the message a truncation marker keeps, at most. */
+const MARKER_MESSAGE_CHARS = 1024
+
+/**
+ * Cut `text` to at most `length` UTF-16 units without splitting a surrogate pair (a lone half
+ * would be written as U+FFFD and change the text).
+ *
+ * @example
+ * cutText('a😀', 2) // 'a'
+ */
+export function cutText(text: string, length: number): string {
+  if (text.length <= length) return text
+  const code = text.charCodeAt(length - 1)
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? length - 1 : length)
+}
+
+/**
+ * Build a truncation marker that fits `maxBytes`: start with the first
+ * {@link MARKER_MESSAGE_CHARS} characters of the message, and halve them until the line fits.
+ * Escaping can make a short message long (a control character becomes six bytes), so the cut is
+ * measured on the final line, never guessed.
+ */
+export function fitMarker(
+  msg: string,
+  maxBytes: number,
+  build: (prefix: string) => string,
+): string {
+  let prefix = cutText(msg, MARKER_MESSAGE_CHARS)
+  let line = build(prefix)
+  while (Buffer.byteLength(line) > maxBytes && prefix.length > 0) {
+    prefix = cutText(prefix, Math.floor(prefix.length / 2))
+    line = build(prefix)
+  }
+  return line
 }
 
 // Built from escape sequences in a string, never literal characters (CLAUDE.md "Gotchas").
@@ -80,7 +118,10 @@ export function serializeRecord(
     json = JSON.stringify({
       time: record.time,
       level: record.level,
-      msg: safeSlice(record.msg),
+      msg:
+        typeof record.msg === 'string'
+          ? cutText(record.msg, MARKER_MESSAGE_CHARS)
+          : '[non-string message]',
       fields: { serializationError: error instanceof Error ? error.message : 'unknown' },
     })
   }
@@ -89,13 +130,19 @@ export function serializeRecord(
   if (json.length * 3 > maxBytes) {
     const bytes = Buffer.byteLength(json)
     if (bytes > maxBytes) {
-      json = escapeLineSeparators(
-        JSON.stringify({
-          time: record.time,
-          level: record.level,
-          msg: safeSlice(record.msg),
-          fields: { truncated: true, originalBytes: bytes },
-        }),
+      const msg = typeof record.msg === 'string' ? record.msg : '[non-string message]'
+      return fitMarker(
+        msg,
+        maxBytes,
+        (prefix) =>
+          `${escapeLineSeparators(
+            JSON.stringify({
+              time: record.time,
+              level: record.level,
+              msg: prefix,
+              fields: { truncated: true, originalBytes: bytes },
+            }),
+          )}\n`,
       )
     }
   }

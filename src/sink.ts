@@ -25,7 +25,7 @@ import type { Formatter } from './format/formatter.ts'
 import { LEVEL_PRIORITY, type Level, type LevelName, toLevel } from './levels.ts'
 import { BoundedQueue, DEFAULT_QUEUE_LIMITS, type QueueItem, type QueueLimits } from './queue.ts'
 import { redactString } from './redact.ts'
-import { DEFAULT_MAX_RECORD_BYTES, serializeRecord } from './serialize.ts'
+import { DEFAULT_MAX_RECORD_BYTES, MIN_RECORD_BYTES, serializeRecord } from './serialize.ts'
 import { stderrTransport } from './transports/console.ts'
 import type { Batch, Transport } from './transports/types.ts'
 
@@ -128,6 +128,16 @@ export function positive(value: number | undefined, fallback: number, name: stri
   return value
 }
 
+/** The record cap: a truncation marker must fit it, so it is at least {@link MIN_RECORD_BYTES}. */
+function recordCap(value: number | undefined): number {
+  const cap = positive(value, DEFAULT_MAX_RECORD_BYTES, 'maxRecordBytes')
+  if (cap < MIN_RECORD_BYTES)
+    throw new RangeError(
+      `maxRecordBytes must be at least ${MIN_RECORD_BYTES} (a truncation marker must fit)`,
+    )
+  return cap
+}
+
 /**
  * Create a sink over a transport.
  *
@@ -143,7 +153,7 @@ export function createSink(options: SinkOptions): Sink {
       transport: options.transport,
       fallback: options.fallback ?? stderrTransport(),
       format: options.format ?? serializeRecord,
-      maxRecordBytes: positive(options.maxRecordBytes, DEFAULT_MAX_RECORD_BYTES, 'maxRecordBytes'),
+      maxRecordBytes: recordCap(options.maxRecordBytes),
       maxBatchBytes: positive(options.maxBatchBytes, 256 * 1024, 'maxBatchBytes'),
       retryPrimaryMs: positive(options.retryPrimaryMs, 30_000, 'retryPrimaryMs'),
       now: options.now ?? Date.now,

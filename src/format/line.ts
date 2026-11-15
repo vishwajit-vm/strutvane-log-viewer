@@ -17,13 +17,19 @@
  *   `err`. A field whose name collides with one of those is written as `fields.<name>`, so nothing
  *   is lost or overwritten.
  * - **Size cap:** a line over `maxBytes` becomes a short marker line with
- *   `{"truncated":true,"originalBytes":N}`, the same rule as the JSON format.
+ *   `{"truncated":true,"originalBytes":N}`, the same rule as the JSON format. The marker keeps as
+ *   much of the message as fits the cap, never splitting a character.
  *
  * @module
  */
 import { type Level, toLevel } from '../levels.ts'
 import { setOwn } from '../own.ts'
-import { escapeLineSeparators, type SerializableRecord, unicodeEscape } from '../serialize.ts'
+import {
+  escapeLineSeparators,
+  fitMarker,
+  type SerializableRecord,
+  unicodeEscape,
+} from '../serialize.ts'
 
 /** Keys lifted out of `fields` into the context object (and back again by the parser). */
 export const LINE_RESERVED_KEYS: readonly string[] = Object.freeze([
@@ -155,5 +161,5 @@ export function formatLine(record: SerializableRecord, env: string, maxBytes: nu
   const bytes = Buffer.byteLength(line)
   if (bytes <= maxBytes) return line
   const marker = JSON.stringify({ truncated: true, originalBytes: bytes })
-  return `${head}${escapeMessage(msg.slice(0, 1024))} ${marker}\n`
+  return fitMarker(msg, maxBytes, (prefix) => `${head}${escapeMessage(prefix)} ${marker}\n`)
 }

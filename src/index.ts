@@ -136,7 +136,7 @@ export {
   redactString,
   registerSensitiveKeys,
 } from './redact.ts'
-export { DEFAULT_MAX_RECORD_BYTES, serializeRecord } from './serialize.ts'
+export { DEFAULT_MAX_RECORD_BYTES, MIN_RECORD_BYTES, serializeRecord } from './serialize.ts'
 export type { ShutdownOptions } from './shutdown.ts'
 export { registerShutdownFlush } from './shutdown.ts'
 export type { Sink, SinkOptions } from './sink.ts'
