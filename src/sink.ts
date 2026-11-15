@@ -24,6 +24,7 @@ import { dayKeyOf } from './files.ts'
 import type { Formatter } from './format/formatter.ts'
 import { LEVEL_PRIORITY, type Level, type LevelName, toLevel } from './levels.ts'
 import { BoundedQueue, DEFAULT_QUEUE_LIMITS, type QueueItem, type QueueLimits } from './queue.ts'
+import { redactString } from './redact.ts'
 import { DEFAULT_MAX_RECORD_BYTES, serializeRecord } from './serialize.ts'
 import { stderrTransport } from './transports/console.ts'
 import type { Batch, Transport } from './transports/types.ts'
@@ -245,7 +246,8 @@ function schedule(state: State): void {
 
 /**
  * A pipeline-generated record (drop report, fallback warning), in the sink's own format so a
- * `line` file stays all lines. It carries no user data.
+ * `line` file stays all lines. It skips the sanitiser, so anything quoted in it from outside (a
+ * transport's error) goes through {@link describeTransportError} first.
  */
 function internalLine(state: State, msg: string, fields: Record<string, unknown>): string {
   return state.opts.format(
@@ -316,7 +318,7 @@ async function deliver(state: State, batch: Batch): Promise<void> {
         const warning = internalLine(
           state,
           `logs: channel "${state.opts.name}" (${transport.name}) failed; writing to ${fallback.name} until it recovers`,
-          { error: describe(error) },
+          { error: describeTransportError(error) },
         )
         await callTransport(fallback, {
           text: warning,
@@ -341,12 +343,33 @@ function callTransport(t: Transport, batch: Batch): Promise<void> {
   }
 }
 
-function describe(error: unknown): Record<string, unknown> {
-  if (error instanceof Error) {
-    const code = (error as { code?: unknown }).code
-    return { name: error.name, message: error.message, ...(code ? { code: String(code) } : {}) }
+/**
+ * A transport's error, safe to write. Its text comes from a driver, a custom shipper or the
+ * network, and often names the target with its credentials (`connect failed
+ * postgres://app:secret@db`), so it is redacted and capped like any logged string. Pipeline
+ * records skip the sanitiser, so this is the only place that can do it.
+ */
+export function describeTransportError(error: unknown): Record<string, unknown> {
+  try {
+    if (error instanceof Error) {
+      const code = (error as { code?: unknown }).code
+      return {
+        name: safeText(error.name),
+        message: safeText(error.message),
+        ...(code ? { code: safeText(code) } : {}),
+      }
+    }
+    return { message: safeText(error) }
+  } catch {
+    return { message: '[unreadable error]' }
   }
-  return { message: String(error) }
+}
+
+const MAX_ERROR_TEXT = 1_024
+
+function safeText(value: unknown): string {
+  const text = String(value)
+  return redactString(text.length > MAX_ERROR_TEXT ? `${text.slice(0, MAX_ERROR_TEXT)}…` : text)
 }
 
 function drain(state: State, timeoutMs: number): Promise<FlushResult> {

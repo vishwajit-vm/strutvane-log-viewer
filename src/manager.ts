@@ -53,7 +53,7 @@ import {
 import type { QueueLimits } from './queue.ts'
 import { createSanitizer, type SanitizeOptions, type Sanitizer } from './redact.ts'
 import { registerShutdownFlush } from './shutdown.ts'
-import { createSink, type Sink } from './sink.ts'
+import { createSink, describeTransportError, type Sink } from './sink.ts'
 import { stderrTransport, stdoutTransport } from './transports/console.ts'
 import { fileTransport } from './transports/file.ts'
 import { slackTransport, type WebhookPost } from './transports/slack.ts'
@@ -306,7 +306,8 @@ export function createLogManager<const T extends LoggingConfig = LoggingConfig>(
             minIntervalMs: channel.minIntervalMs,
             ...(options.slackPost ? { post: options.slackPost } : {}),
             onError: (error) => {
-              const text = error instanceof Error ? error.message : String(error)
+              // Quoted outside the sanitiser: redacted and capped like a fallback warning.
+              const text = describeTransportError(error)['message']
               const line = formatter(config.format)(
                 {
                   time: new Date(now()).toISOString(),
