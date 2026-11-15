@@ -369,7 +369,8 @@ describe('file transport', () => {
       now: () => T0,
     })
     for (let i = 0; i < 2_000; i++) log.info('rotate', { i, pad: 'x'.repeat(50) })
-    await log.close()
+    // ~140 small writes and rotations: give a busy machine time, the test is about rotation.
+    expect((await log.close(60_000)).flushed).toBe(true)
     const files = readLogDir(d) // throws on any torn line
     expect(files.length).toBeGreaterThan(5)
     for (const f of files) expect(statSync(join(d, f.file)).size).toBeLessThanOrEqual(cap)
