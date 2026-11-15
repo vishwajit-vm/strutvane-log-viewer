@@ -635,6 +635,22 @@ export function resolveChannelConfig(
   return resolved
 }
 
+/**
+ * A null-prototype record holding the own enumerable entries of `sources` (later wins). Lookups
+ * in it can never hit `Object.prototype` (`toString`, `constructor`, `__proto__`), and with no
+ * prototype there is no `__proto__` setter, so that key stays an ordinary entry.
+ */
+function ownRecord<V>(
+  ...sources: ReadonlyArray<Readonly<Record<string, V>> | undefined>
+): Record<string, V> {
+  const out = Object.create(null) as Record<string, V>
+  for (const source of sources) {
+    if (source === undefined) continue
+    for (const [key, value] of Object.entries(source)) out[key] = value
+  }
+  return out
+}
+
 function isObject(value: unknown): value is Record<string, unknown> & { driver?: unknown } {
   return typeof value === 'object' && value !== null
 }
@@ -708,9 +724,16 @@ export function resolveLoggingConfig(
     else d = { ...base, path: isAbsolute(input.path) ? input.path : resolve(root, input.path) }
   }
 
-  const declared: Record<string, ChannelConfig> = { ...builtIns(d), ...(input.channels ?? {}) }
-  const envStack = input.channels?.['stack'] === undefined
-  const channels: Record<string, ResolvedChannel> = {}
+  // Null-prototype maps, and `Object.hasOwn` for every membership test: channel names come from
+  // `.env` and from application input, and an inherited name (`toString`, `constructor`,
+  // `__proto__`) must never pass for a channel.
+  const declared = ownRecord<ChannelConfig>(builtIns(d), input.channels)
+  const isDeclared = (name: string): boolean => Object.hasOwn(declared, name)
+  const envStack =
+    input.channels === undefined ||
+    !Object.hasOwn(input.channels, 'stack') ||
+    input.channels['stack'] === undefined
+  const channels = ownRecord<ResolvedChannel>()
   const edges = new Map<string, readonly string[]>()
 
   for (const [name, channel] of Object.entries(declared)) {
@@ -732,15 +755,12 @@ export function resolveLoggingConfig(
         continue
       }
       for (const child of channel.channels) {
-        if (!(child in declared))
+        if (!isDeclared(child))
           problems.push(
             `${where}.channels: "${child}" is not defined; defined channels: ${Object.keys(declared).join(', ')}`,
           )
       }
-      edges.set(
-        name,
-        channel.channels.filter((c) => c in declared),
-      )
+      edges.set(name, channel.channels.filter(isDeclared))
       continue
     }
     const resolved = resolveLeaf(problems, where, channel, d, root)
@@ -759,7 +779,7 @@ export function resolveLoggingConfig(
     // LOG_STACK names may be wrong; drop those (and any that would loop back) with a warning.
     const kept: string[] = []
     for (const child of d.stack) {
-      if (!(child in declared)) {
+      if (!isDeclared(child)) {
         reader.warn(
           'LOG_STACK',
           `LOG_STACK names "${child}", which is not a channel; defined channels: ${Object.keys(declared).join(', ')}`,
@@ -785,13 +805,13 @@ export function resolveLoggingConfig(
 
   let def = input.default
   if (def !== undefined) {
-    if (!(def in declared))
+    if (!isDeclared(def))
       problems.push(
         `default: "${def}" is not defined; defined channels: ${Object.keys(declared).join(', ')}`,
       )
   } else {
     def = d.channel ?? 'stack'
-    if (!(def in declared)) {
+    if (!isDeclared(def)) {
       reader.warn(
         'LOG_CHANNEL',
         `LOG_CHANNEL="${def}" is not a channel; using stack (defined channels: ${Object.keys(declared).join(', ')})`,
@@ -801,13 +821,13 @@ export function resolveLoggingConfig(
   }
   let deprecations = input.deprecations
   if (deprecations !== undefined) {
-    if (!(deprecations in declared))
+    if (!isDeclared(deprecations))
       problems.push(
         `deprecations: "${deprecations}" is not defined; defined channels: ${Object.keys(declared).join(', ')}`,
       )
   } else {
     deprecations = d.deprecations
-    if (!(deprecations in declared)) {
+    if (!isDeclared(deprecations)) {
       reader.warn(
         'LOG_DEPRECATIONS_CHANNEL',
         `LOG_DEPRECATIONS_CHANNEL="${deprecations}" is not a channel; using null`,

@@ -348,9 +348,13 @@ export function createLogManager<const T extends LoggingConfig = LoggingConfig>(
     }
   }
 
+  /** A declared channel, never an inherited property (`toString`, `__proto__`, …). */
+  const declared = (name: string): ResolvedChannel | undefined =>
+    Object.hasOwn(config.channels, name) ? config.channels[name] : undefined
+
   const sinkFor = (name: string): Sink | null => {
     if (sinks.has(name)) return sinks.get(name) ?? null
-    const channel = config.channels[name]
+    const channel = declared(name)
     const sink = channel ? makeSink(name, channel) : null
     sinks.set(name, sink)
     if (sink) allSinks.push(sink)
@@ -358,7 +362,7 @@ export function createLogManager<const T extends LoggingConfig = LoggingConfig>(
   }
 
   const leavesOf = (name: string): readonly string[] => {
-    const channel = config.channels[name]
+    const channel = declared(name)
     if (!channel) return []
     return channel.driver === 'stack' ? channel.leaves : [name]
   }
@@ -398,7 +402,7 @@ export function createLogManager<const T extends LoggingConfig = LoggingConfig>(
 
   const channel = (name?: string): StrutvaneLogger => {
     const wanted = name ?? config.default
-    if (!(wanted in config.channels)) {
+    if (!Object.hasOwn(config.channels, wanted)) {
       unknownChannel(wanted)
       return defaultLogger()
     }
@@ -408,10 +412,11 @@ export function createLogManager<const T extends LoggingConfig = LoggingConfig>(
   const stack = (names: readonly string[]): StrutvaneLogger => {
     const leaves: string[] = []
     for (const name of names) {
-      if (name in config.channels) leaves.push(...leavesOf(name))
+      if (Object.hasOwn(config.channels, name)) leaves.push(...leavesOf(name))
       else unknownChannel(name)
     }
-    if (leaves.length === 0 && names.every((n) => !(n in config.channels))) return defaultLogger()
+    if (leaves.length === 0 && names.every((n) => !Object.hasOwn(config.channels, n)))
+      return defaultLogger()
     // Keyed by the leaves it writes to, so the cache stays bounded by the configured channels.
     return emitterFor(`stack:${[...new Set(leaves)].join(',')}`, leaves)
   }

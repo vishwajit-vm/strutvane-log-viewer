@@ -19,6 +19,7 @@
 import type { LogFields } from '@strutvane/contracts'
 import type { LogContext } from './context.ts'
 import type { Level } from './levels.ts'
+import { setOwn } from './own.ts'
 
 const CORRELATION_KEYS = ['requestId', 'traceId', 'tenantId', 'actorId'] as const
 
@@ -55,7 +56,7 @@ function assignSafely(target: MutableFields, source: LogFields | undefined): voi
     } catch {
       value = '[Unreadable]'
     }
-    target[key] = value
+    setOwn(target, key, value)
   }
 }
 

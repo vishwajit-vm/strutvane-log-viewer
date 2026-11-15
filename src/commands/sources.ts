@@ -43,7 +43,8 @@ function group(pairs: Iterable<readonly [string, string]>): LogSource[] {
 export function sourcesFor(config: ResolvedLoggingConfig, channel?: string): LogSource[] {
   const names = (() => {
     if (channel === undefined) return Object.keys(config.channels)
-    const resolved = config.channels[channel]
+    // Own entries only: an inherited name (`toString`, `__proto__`) is not a channel.
+    const resolved = Object.hasOwn(config.channels, channel) ? config.channels[channel] : undefined
     if (!resolved) {
       throw new LogSourceError(
         `channel "${channel}" is not defined in config/logging; defined channels: ${Object.keys(config.channels).join(', ')}`,
@@ -53,7 +54,7 @@ export function sourcesFor(config: ResolvedLoggingConfig, channel?: string): Log
   })()
   const pairs: Array<readonly [string, string]> = []
   for (const name of names) {
-    const c = config.channels[name]
+    const c = Object.hasOwn(config.channels, name) ? config.channels[name] : undefined
     if (c && (c.driver === 'single' || c.driver === 'daily')) pairs.push([c.dir, c.base])
   }
   if (pairs.length === 0 && channel !== undefined) {

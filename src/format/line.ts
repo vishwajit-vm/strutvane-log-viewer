@@ -22,6 +22,7 @@
  * @module
  */
 import { type Level, toLevel } from '../levels.ts'
+import { setOwn } from '../own.ts'
 import { escapeLineSeparators, type SerializableRecord, unicodeEscape } from '../serialize.ts'
 
 /** Keys lifted out of `fields` into the context object (and back again by the parser). */
@@ -110,7 +111,7 @@ function contextOf(record: SerializableRecord): Record<string, unknown> {
   const fields = record['fields']
   if (typeof fields === 'object' && fields !== null && !Array.isArray(fields)) {
     for (const [key, value] of Object.entries(fields)) {
-      ctx[RESERVED.has(key) ? `fields.${key}` : key] = value
+      setOwn(ctx, RESERVED.has(key) ? `fields.${key}` : key, value)
     }
   }
   for (const [key, value] of Object.entries(record)) {

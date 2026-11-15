@@ -40,6 +40,7 @@ import {
   registerSensitiveKeys,
   sensitiveKeyMatcher,
 } from '@strutvane/core'
+import { setOwn } from './own.ts'
 
 export { registerSensitiveKeys }
 
@@ -332,7 +333,7 @@ export function createSanitizer(options: Partial<SanitizeOptions> = {}): Sanitiz
     for (let i = 0; i < limit; i++) {
       const key = keys[i] as string
       if (o.redact && isSensitiveKey(key)) {
-        out[key] = REDACTED
+        setOwn(out, key, REDACTED)
         continue
       }
       let v: unknown
@@ -342,7 +343,7 @@ export function createSanitizer(options: Partial<SanitizeOptions> = {}): Sanitiz
         v = '[Unreadable]'
       }
       const w = walk(v, depth + 1, seen)
-      if (w !== undefined) out[key] = w
+      if (w !== undefined) setOwn(out, key, w)
     }
     if (keys.length > limit) out._truncatedKeys = keys.length - limit
     return out
@@ -372,7 +373,7 @@ export function createSanitizer(options: Partial<SanitizeOptions> = {}): Sanitiz
         } catch {
           v = '[Unreadable]'
         }
-        out[key] = o.redact && isSensitiveKey(key) ? REDACTED : walk(v, depth + 1, seen)
+        setOwn(out, key, o.redact && isSensitiveKey(key) ? REDACTED : walk(v, depth + 1, seen))
       }
     } catch {
       out.name = out.name ?? 'Error'

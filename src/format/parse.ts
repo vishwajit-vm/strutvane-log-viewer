@@ -18,6 +18,7 @@
  * @module
  */
 import { toLevel } from '../levels.ts'
+import { setOwn } from '../own.ts'
 import { LINE_RESERVED_KEYS, unescapeMessage } from './line.ts'
 
 /** A parsed record. Unknown keys are kept; nothing is trusted to have a particular type. */
@@ -88,7 +89,7 @@ function parseTextLine(line: string): ParsedRecord | undefined {
   for (const [key, value] of Object.entries(ctx)) {
     if (RESERVED.has(key)) record[key] = value
     else if (key.startsWith('fields.') && RESERVED.has(key.slice(7))) fields[key.slice(7)] = value
-    else fields[key] = value
+    else setOwn(fields, key, value)
   }
   if (Object.keys(fields).length > 0) record['fields'] = fields
   return record
