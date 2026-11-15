@@ -78,3 +78,22 @@ test('a stack of two file-like channels costs one redaction per record', async (
   expect(log.stats().written).toBe(2 * n)
   expect(perSecond).toBeGreaterThan(40_000 / factor)
 })
+
+test('redaction stays linear: hostile 8 KB strings cost milliseconds, not a blocked event loop', async () => {
+  const { redactString } = await import('../src/redact.ts')
+  const hostile = [
+    'abcdefgh'.repeat(1024), // scheme-like letters with no "://" (was quadratic)
+    'a://'.repeat(2048),
+    'a://:'.repeat(1638),
+    `x://u:${'p'.repeat(8180)}`,
+    `?${'a_'.repeat(4090)}`,
+    'Bearer '.repeat(1170),
+    '4111 '.repeat(1638),
+    `eyJ${'a.'.repeat(4090)}`,
+  ]
+  for (const text of hostile) {
+    const started = performance.now()
+    for (let i = 0; i < 5; i++) redactString(text)
+    expect((performance.now() - started) / 5, text.slice(0, 12)).toBeLessThan(10 * factor)
+  }
+})

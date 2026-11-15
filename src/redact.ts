@@ -18,7 +18,8 @@
  *    - *By pattern,* inside every string including messages:
  *      - JWTs
  *      - Bearer/Basic credentials
- *      - credentials in URLs
+ *      - credentials in URLs (`redis://:secret@host` too, and passwords containing `:` or `@`)
+ *      - webhook URLs whose path is the secret (Slack, Discord, Microsoft Teams)
  *      - secret query parameters (`?token=…`, `&sig=…`, `#access_token=…`)
  *      - well-known prefixed API keys (`sk_live_…`, `ghp_…`, `AKIA…`, `xoxb-…`, …)
  *      - PEM private keys
@@ -49,6 +50,7 @@ export type PatternRule =
   | 'jwt'
   | 'bearer'
   | 'urlCredentials'
+  | 'webhook'
   | 'queryString'
   | 'apiKey'
   | 'privateKey'
@@ -97,7 +99,7 @@ export const normaliseKey: (key: string) => string = normalizeSensitiveKey
 interface PatternDef {
   readonly rule: PatternRule
   readonly re: RegExp
-  readonly replace: string | ((match: string) => string)
+  readonly replace: string | ((match: string, ...groups: string[]) => string)
 }
 
 const PATTERNS: readonly PatternDef[] = [
@@ -119,11 +121,24 @@ const PATTERNS: readonly PatternDef[] = [
     re: /\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{8,}/gi,
     replace: (m) => `${m.split(/\s+/)[0]} ${REDACTED}`,
   },
+  // Webhook URLs whose path IS the secret (Slack, Discord, Microsoft Teams): anyone holding one
+  // can post to the channel. The host and the kind of hook stay readable.
+  {
+    rule: 'webhook',
+    re: /(https?:\/\/(?:hooks\.slack\.com\/(?:services|workflows|triggers)\/|(?:[a-z0-9-]+\.)?discord(?:app)?\.com\/api\/webhooks\/|[a-z0-9-]+\.webhook\.office\.com\/|outlook\.office\.com\/webhook\/))[^\s"'<>`]+/gi,
+    replace: (_m, prefix: string) => `${prefix}[REDACTED:webhook]`,
+  },
   // Credentials inside URLs: scheme://user:password@host → scheme://user:[REDACTED]@host
+  // - the user may be empty (`redis://:password@host`, the usual Redis form);
+  // - the password may contain `:` and `@` (unencoded in hand-written connection strings), so it
+  //   runs to the LAST `@` of the authority. `/`, `?` and `#` end the authority, as in every URL
+  //   parser, so a URL with a port and an `@` later in its path or query keeps its host.
+  // - Linear time: the match is the whole authority (no backtracking over the password), and the
+  //   scheme is bounded and must start a word, so a long hostile string costs one pass.
   {
     rule: 'urlCredentials',
-    re: /([a-z][a-z0-9+.-]*:\/\/)([^\s:@/]+):([^\s@/]+)@/gi,
-    replace: (m) => m.replace(/:([^:@]+)@$/, `:${REDACTED}@`),
+    re: /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}:\/\/[^\s/?#"'<>`]*/gi,
+    replace: redactUserinfo,
   },
   // Secret query parameters inside any text: ?token=…, &X-Amz-Signature=…, #access_token=…
   // The name may carry a prefix (api_key, client_secret, refresh_token); only the value is hidden.
@@ -146,6 +161,20 @@ const PATTERNS: readonly PatternDef[] = [
     replace: (m) => (luhnValid(m.replace(/[ -]/g, '')) ? '[REDACTED:pan]' : m),
   },
 ]
+
+/**
+ * Hide the password in a `scheme://authority` match: the userinfo runs to the authority's last
+ * `@`, and the password is everything after the userinfo's first `:`. No `:` (a user only, or a
+ * host and port) or no `@` leaves the text unchanged.
+ */
+function redactUserinfo(match: string): string {
+  const authorityStart = match.indexOf('://') + 3
+  const at = match.lastIndexOf('@')
+  if (at < authorityStart) return match
+  const colon = match.indexOf(':', authorityStart)
+  if (colon === -1 || colon > at) return match
+  return `${match.slice(0, colon + 1)}${REDACTED}${match.slice(at)}`
+}
 
 /** Luhn checksum, used to recognise card numbers. */
 export function luhnValid(digits: string): boolean {
@@ -357,7 +386,7 @@ export function createSanitizer(options: Partial<SanitizeOptions> = {}): Sanitiz
   ): SerialisedError => {
     const out: SerialisedError = {}
     try {
-      out.name = err.name
+      out.name = str(String(err.name))
       out.message = str(String(err.message))
       if (typeof err.stack === 'string') out.stack = str(err.stack)
       const code = (err as { code?: unknown }).code

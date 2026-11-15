@@ -43,6 +43,7 @@ const SECRETS: Record<PatternRule, string> = {
   pan: '4111 1111 1111 1111',
   queryString: 'https://app.test/callback?code=q7Zr4Ns9Kp2&state=1',
   apiKey: FAKE_STRIPE_KEY,
+  webhook: 'https://hooks.slack.com/services/T0000/B0000/hookSecretValue9',
 }
 const LEAK: Record<PatternRule, string> = {
   jwt: 'c2lnbmF0dXJlLXZhbHVl',
@@ -52,6 +53,7 @@ const LEAK: Record<PatternRule, string> = {
   apiKey: FAKE_STRIPE_KEY,
   privateKey: 'MIIEowIBAAKCAQEA',
   pan: '4111 1111 1111 1111',
+  webhook: 'hookSecretValue9',
 }
 
 describe('key-based redaction', () => {
