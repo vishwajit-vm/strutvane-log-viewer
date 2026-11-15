@@ -106,8 +106,9 @@ export interface ClearLogsResult {
 }
 
 /**
- * Delete log files of `sources` (`log:clear`). The newest file of each process's stream is never
- * deleted, since a running process may be appending to it.
+ * Delete log files of `sources` (`log:clear`). The newest file of each process's stream and every
+ * daily file dated today or later are never deleted, since a running process may be appending to
+ * them.
  *
  * @example
  * await clearLogs(sourcesFor(config), { days: 7 }) // keep the last week
@@ -118,12 +119,14 @@ export async function clearLogs(
 ): Promise<ClearLogsResult> {
   const days = options.days ?? 0
   if (!Number.isInteger(days) || days < 0) throw new RangeError('days must be a whole number ≥ 0')
-  const before = days > 0 ? shiftDay(dayKeyOf(options.now ?? Date.now()), days - 1) : undefined
+  const now = options.now ?? Date.now()
+  const before = days > 0 ? shiftDay(dayKeyOf(now), days - 1) : undefined
   const deleted: string[] = []
   const live: string[] = []
   for (const source of sources) {
     const result = await clearLogFiles(source.dir, {
       bases: source.bases,
+      now,
       ...(before === undefined ? {} : { before }),
     })
     deleted.push(...result.deleted)

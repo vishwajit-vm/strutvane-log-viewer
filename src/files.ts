@@ -298,6 +298,8 @@ export interface ClearOptions {
   readonly before?: string
   /** Only files with these base names. Default: `strutvane` (the built-in channels' files). */
   readonly bases?: ReadonlySet<string>
+  /** The clock (epoch ms) that decides what "today" is. Default: now. */
+  readonly now?: number
 }
 
 /** The outcome of {@link clearLogFiles}. */
@@ -308,9 +310,14 @@ export interface ClearResult {
 }
 
 /**
- * Delete log files (`log:clear`, the viewer's "clear"). The newest file of every writer stream is
- * never deleted: it may be the live file of a running process. A single file's day is its last
- * modification day, since its name has none.
+ * Delete log files (`log:clear`, the viewer's "clear"). Two rules keep live files:
+ * - the newest file of every writer stream is never deleted: it may be the live file of a running
+ *   process;
+ * - a daily file dated today or later is never deleted, whatever `before` says. A file dated in the
+ *   future (a clock that was ahead, another host sharing the directory) would otherwise make
+ *   today's live file look old to the first rule.
+ *
+ * A single file's day is its last modification day, since its name has none.
  *
  * @example
  * await clearLogFiles('storage/logs', { before: '2026-11-01' })
@@ -318,13 +325,15 @@ export interface ClearResult {
 export async function clearLogFiles(dir: string, options: ClearOptions = {}): Promise<ClearResult> {
   const names = await listLogFiles(dir, options.bases ?? DEFAULT_BASES)
   const live = newestPerStream(names)
+  const today = dayKeyOf(options.now ?? Date.now())
   const deleted: string[] = []
   const kept: string[] = []
   for (const name of names) {
     const day = await fileDay(dir, name)
     if (day === undefined) continue
     if (options.before !== undefined && day >= options.before) continue
-    if (live.has(name)) {
+    const dated = parseLogFileName(name)?.day
+    if (live.has(name) || (dated !== undefined && dated >= today)) {
       kept.push(name)
       continue
     }
