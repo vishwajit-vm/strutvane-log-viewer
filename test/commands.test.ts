@@ -283,15 +283,15 @@ describe('list and clear', () => {
       writeFileSync(join(d, n), 'x\n')
     utimesSync(join(d, 'strutvane.log'), new Date('2026-10-01'), new Date('2026-10-01'))
     const now = Date.parse('2026-11-15T12:00:00Z')
-    const kept = await clearLogs(src(d), { days: 3, now })
+    const kept = await clearLogs(src(d), { confirm: true, days: 3, now })
     expect(kept.deleted).toEqual(['strutvane-2026-11-01.log'])
     expect(kept.live).toEqual(['strutvane.log', 'strutvane-2026-11-01.worker-2.log'])
-    const all = await clearLogs(src(d), { now })
+    const all = await clearLogs(src(d), { confirm: true, now })
     expect(all.deleted).toEqual(['strutvane-2026-11-13.log'])
     expect(readdirSync(d).sort()).toEqual(
       ['strutvane-2026-11-01.worker-2.log', 'strutvane-2026-11-15.log', 'strutvane.log'].sort(),
     )
-    await expect(clearLogs(src(d), { days: -1 })).rejects.toThrow(RangeError)
+    await expect(clearLogs(src(d), { confirm: true, days: -1 })).rejects.toThrow(RangeError)
   })
 
   test('sourcesFor: a channel (or a stack) maps to its file bases; non-file channels are explained', () => {
@@ -393,22 +393,22 @@ describe('command adapters', () => {
     expect(await logListCommand.run([], a.io)).toBe(0)
     expect(a.stdout.text()).toContain('strutvane-2026-11-02.log')
     const b = io({ env, config: {} })
-    expect(await logClearCommand.run(['--days=1'], b.io)).toBe(0)
+    expect(await logClearCommand.run(['--days=1', '--force'], b.io)).toBe(0)
     expect(b.stdout.text()).toBe(
       'Deleted 1 file(s). Kept 1 file(s) still being written: strutvane-2026-11-02.log.\n',
     )
     const c = io({ env })
-    expect(await logClearCommand.run([], c.io)).toBe(0)
+    expect(await logClearCommand.run(['--force'], c.io)).toBe(0)
     expect(c.stdout.text()).toBe(
       'Deleted 0 file(s). Kept 1 file(s) still being written: strutvane-2026-11-02.log.\n',
     )
     const e = io({ env })
-    expect(await logClearCommand.run(['--days=x'], e.io)).toBe(1)
+    expect(await logClearCommand.run(['--days=x', '--force'], e.io)).toBe(1)
     const f = io({ env })
     expect(await logListCommand.run(['--channel=nope'], f.io)).toBe(1)
     expect(f.stderr.text()).toContain('channel "nope" is not defined')
     const g = io({ env: { LOG_PATH: join(d, 'empty') } })
-    expect(await logClearCommand.run([], g.io)).toBe(0)
+    expect(await logClearCommand.run(['--force'], g.io)).toBe(0)
     expect(g.stdout.text()).toBe('Deleted 0 file(s).\n')
   })
 })

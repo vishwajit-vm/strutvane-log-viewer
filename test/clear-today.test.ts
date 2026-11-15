@@ -53,6 +53,7 @@ describe('clearing keeps today and later', () => {
     const d = dir()
     seed(d)
     const result = await clearLogs([{ dir: d, bases: new Set(['strutvane']) }], {
+      confirm: true,
       now: NOW,
     })
     expect(result.deleted).toEqual(['strutvane-2026-11-13.log', 'strutvane-2026-11-14.log'])

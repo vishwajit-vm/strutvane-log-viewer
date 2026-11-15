@@ -152,12 +152,12 @@ Files are ordered with `compareLogFiles` (base, day, process, part number), neve
 ```bash
 node strut log:tail [--level=warning] [--channel=payments] [--filter=text] [-n 50] [-f]
 node strut log:list [--channel=payments]
-node strut log:clear [--days=7] [--channel=payments]
+node strut log:clear [--days=7] [--channel=payments] [--force]
 ```
 
 - `log:tail` shows the last records and, with `-f`, new ones as they arrive. It reads both formats and merges the per-process files by timestamp. Output is re-redacted and printed in the `line` format, so a hostile log line can't drive your terminal.
 - `log:list` shows every file with its size and day, and totals per day.
-- `log:clear` deletes files, keeping the last `--days` days if given; files a running process may still write are kept and listed.
+- `log:clear` deletes files, keeping the last `--days` days if given; files a running process may still write, and daily files dated today or later, are kept and listed. Deleting can't be undone, so it asks first in a terminal; without a terminal (CI, scripts, containers) it refuses unless you pass `--force`. The function behind it, `clearLogs(sources, { confirm: true, days })`, requires `confirm: true` for the same reason.
 
 ## Migrating from v1 (`0.1.0-next.0`)
 

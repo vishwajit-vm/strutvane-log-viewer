@@ -6,7 +6,7 @@
  * ```
  * node strut log:tail [--level=warning] [--channel=payments] [--filter=text] [-n 50] [-f]
  * node strut log:list [--channel=payments]
- * node strut log:clear [--days=N] [--channel=payments]
+ * node strut log:clear [--days=N] [--channel=payments] [--force]
  * ```
  *
  * Each command reads `config/logging` (passed in `io.config`) and `.env`, prints to `io.stdout`,
@@ -15,6 +15,7 @@
  *
  * @module
  */
+import { createInterface } from 'node:readline/promises'
 import { parseArgs } from 'node:util'
 import { type Env, type LoggingConfig, resolveLoggingConfig } from '../config.ts'
 import { toLevel } from '../levels.ts'
@@ -24,7 +25,7 @@ import { type LogSource, sourcesFor } from './sources.ts'
 import { formatTailEntry, tailLogs } from './tail.ts'
 
 export type { ClearLogsOptions, ClearLogsResult, ListedFile, LogListing } from './list.ts'
-export { clearLogs, formatLogList, humanSize, listLogs } from './list.ts'
+export { ClearNotConfirmedError, clearLogs, formatLogList, humanSize, listLogs } from './list.ts'
 export type { LogSource } from './sources.ts'
 export { LogSourceError, sourcesFor } from './sources.ts'
 export type { TailEntry, TailFilter, TailLogsOptions } from './tail.ts'
@@ -44,6 +45,24 @@ export interface CommandIO {
   readonly signal?: AbortSignal
   /** Poll interval for `--follow` (tests). Default: 500 ms. */
   readonly pollMs?: number
+  /**
+   * Asks a yes/no question (`log:clear`). Default: a prompt when stdin and stdout are terminals;
+   * without one, `log:clear` refuses unless `--force` is given.
+   */
+  readonly confirm?: (question: string) => Promise<boolean>
+}
+
+/** A yes/no prompt on the terminal, or `undefined` when there is no terminal to ask in. */
+function terminalConfirm(): ((question: string) => Promise<boolean>) | undefined {
+  if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) return undefined
+  return async (question) => {
+    const prompt = createInterface({ input: process.stdin, output: process.stdout })
+    try {
+      return /^y(es)?$/i.test((await prompt.question(question)).trim())
+    } finally {
+      prompt.close()
+    }
+  }
 }
 
 /** A command the CLI registry can mount. */
@@ -173,10 +192,11 @@ export const logListCommand: LogCommand = {
 
 /**
  * `log:clear`: delete log files, keeping the last `--days` days if given. The file a running
- * process is writing is never deleted.
+ * process is writing is never deleted. Deleting can't be undone, so it asks first in a terminal;
+ * without one (CI, scripts, Docker) it refuses unless `--force` is given.
  *
  * @example
- * await logClearCommand.run(['--days=7'], { stdout: process.stdout, stderr: process.stderr })
+ * await logClearCommand.run(['--days=7', '--force'], { stdout: process.stdout, stderr: process.stderr })
  */
 export const logClearCommand: LogCommand = {
   name: 'log:clear',
@@ -185,16 +205,34 @@ export const logClearCommand: LogCommand = {
     'Usage: node strut log:clear [options]',
     '  --days=<n>          keep the last n days (today included); default: clear every day',
     '  --channel=<name>    only the files of this channel',
+    '  --force             delete without asking (needed when there is no terminal)',
   ].join('\n'),
   run(argv, io) {
     return guarded(this, io, async () => {
       const { values } = parseArgs({
         args: [...argv],
         strict: true,
-        options: { days: { type: 'string' }, channel: { type: 'string' } },
+        options: {
+          days: { type: 'string' },
+          channel: { type: 'string' },
+          force: { type: 'boolean' },
+        },
       })
       const days = wholeNumber(values.days, 'days', 0)
-      const result = await clearLogs(sources(io, values.channel), { days })
+      const found = sources(io, values.channel)
+      if (values.force !== true) {
+        const ask = io.confirm ?? terminalConfirm()
+        if (!ask)
+          throw new UsageError(
+            "log:clear deletes log files and can't be undone, and there is no terminal to confirm in; run it again with --force",
+          )
+        const what = `${values.channel === undefined ? 'the log files' : `the "${values.channel}" log files`}${days > 0 ? ` older than the last ${days} day(s)` : ''}`
+        if (!(await ask(`Delete ${what}? Files still being written are kept. [y/N] `))) {
+          io.stdout.write('Cancelled; nothing was deleted.\n')
+          return 1
+        }
+      }
+      const result = await clearLogs(found, { confirm: true, days })
       io.stdout.write(
         `Deleted ${result.deleted.length} file(s).${result.live.length > 0 ? ` Kept ${result.live.length} file(s) still being written: ${result.live.join(', ')}.` : ''}\n`,
       )

@@ -92,6 +92,11 @@ export function formatLogList(listing: LogListing): string[] {
 
 /** Options for {@link clearLogs}. */
 export interface ClearLogsOptions {
+  /**
+   * Must be `true`. Deleting logs can't be undone, so every caller says so explicitly: the
+   * `log:clear` command asks in a terminal, or needs `--force` when there is none.
+   */
+  readonly confirm: true
   /** Keep the last `days` days (today included). Omitted or 0: clear every day. */
   readonly days?: number
   /** The clock (epoch ms). Default: now. */
@@ -105,18 +110,32 @@ export interface ClearLogsResult {
   readonly live: readonly string[]
 }
 
+/** {@link clearLogs} was called without `confirm: true`. Nothing was deleted. */
+export class ClearNotConfirmedError extends Error {
+  override readonly name = 'ClearNotConfirmedError'
+  /** Stable code for tooling. */
+  readonly code = 'LOG_CLEAR_NOT_CONFIRMED'
+}
+
 /**
  * Delete log files of `sources` (`log:clear`). The newest file of each process's stream and every
  * daily file dated today or later are never deleted, since a running process may be appending to
  * them.
  *
+ * @throws ClearNotConfirmedError without `confirm: true` (nothing is deleted)
+ *
  * @example
- * await clearLogs(sourcesFor(config), { days: 7 }) // keep the last week
+ * await clearLogs(sourcesFor(config), { confirm: true, days: 7 }) // keep the last week
  */
 export async function clearLogs(
   sources: readonly LogSource[],
-  options: ClearLogsOptions = {},
+  options: ClearLogsOptions,
 ): Promise<ClearLogsResult> {
+  // Checked at runtime too: JavaScript callers and `as` casts skip the type.
+  if ((options as { readonly confirm?: unknown } | undefined)?.confirm !== true)
+    throw new ClearNotConfirmedError(
+      "clearLogs deletes log files and can't be undone; pass { confirm: true }",
+    )
   const days = options.days ?? 0
   if (!Number.isInteger(days) || days < 0) throw new RangeError('days must be a whole number ≥ 0')
   const now = options.now ?? Date.now()
