@@ -73,7 +73,9 @@ describe('slack transport', () => {
 
   test('a quiet window still reports its count, on a timer', async () => {
     const { sent, post } = recorder()
-    const t = slackTransport({ url: URL_OK, post, minIntervalMs: 40 })
+    // The transport's clock stands still, so a slow machine can't end the window early; only the
+    // real summary timer (40 ms) moves things on.
+    const t = slackTransport({ url: URL_OK, post, minIntervalMs: 40, now: () => T0 })
     await t.write(batch([{ level: 'critical', msg: 'first' }]))
     await t.write(
       batch([
