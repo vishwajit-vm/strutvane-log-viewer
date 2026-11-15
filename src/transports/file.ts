@@ -85,8 +85,9 @@ export const DEFAULT_MAX_FILE_BYTES: number = 100 * 1024 * 1024
  * - **Daily rollover follows the records, not the wall clock:** a batch never mixes UTC days (the
  *   queue guarantees it), and a batch for a new day opens that day's file. Every record therefore
  *   lands in the file of its own day, exactly once, even across midnight.
- * - **Size parts:** when the next batch would push a file past `maxFileBytes`, the next part
- *   (`-2`, `-3`, …) starts. A batch is never split, so no line is ever torn across files.
+ * - **Size parts:** no file grows past `maxFileBytes`. A batch fills the current part up to the
+ *   cap and continues in the next one (`-2`, `-3`, …), cut only between lines, so no line is ever
+ *   torn across files. (A single line larger than the whole cap gets a part of its own.)
  * - **Restarts resume** the newest existing part of the day if it still has room.
  * - **Retention** runs when a new day starts and deletes whole expired days, never the day being
  *   written.
@@ -146,6 +147,19 @@ export function fileTransport(options: FileTransportOptions): FileTransport {
     if (w) await w.close()
   }
 
+  const appendNow = async (text: string, bytes: number): Promise<void> => {
+    const w = writer
+    if (!w) throw new Error('log file is not open')
+    try {
+      await w.append(text, bytes)
+    } catch (error) {
+      // Force a reopen on the next write: the directory may come back.
+      await close().catch(() => undefined)
+      throw error
+    }
+    size += bytes
+  }
+
   return {
     name: 'file',
     currentFile: () => path,
@@ -165,24 +179,61 @@ export function fileTransport(options: FileTransportOptions): FileTransport {
         await openLatest(day)
       } else if (!writer) {
         await openLatest(day)
-      } else if (size > 0 && size + batch.bytes > maxFileBytes) {
-        await close()
-        part++
-        await openPart(day, 0)
       }
-      const w = writer
-      if (!w) throw new Error('log file is not open')
-      try {
-        await w.append(batch.text, batch.bytes)
-      } catch (error) {
-        // Force a reopen on the next write: the directory may come back.
-        await close().catch(() => undefined)
-        throw error
+      // Fill the current part, then continue in the next one. A batch is cut only between lines,
+      // so no line is ever torn across files, and no part grows past the cap unless a single line
+      // is larger than the whole cap (that line then gets a part of its own).
+      let text = batch.text
+      let bytes = batch.bytes
+      while (text !== '') {
+        if (size + bytes <= maxFileBytes) {
+          await appendNow(text, bytes)
+          break
+        }
+        let head = linesWithin(text, maxFileBytes - size)
+        if (head.text === '' && size === 0) head = firstLine(text)
+        if (head.text !== '') {
+          await appendNow(head.text, head.bytes)
+          text = text.slice(head.text.length)
+          bytes -= head.bytes
+        }
+        if (text !== '') {
+          await close()
+          part++
+          await openPart(day, 0)
+        }
       }
-      size += batch.bytes
     },
     close,
   }
+}
+
+/** A prefix of whole lines of `text` and its UTF-8 size. */
+interface Lines {
+  readonly text: string
+  readonly bytes: number
+}
+
+/** The longest prefix of whole lines of `text` that fits in `room` bytes (possibly empty). */
+function linesWithin(text: string, room: number): Lines {
+  let end = 0
+  let bytes = 0
+  for (;;) {
+    const nl = text.indexOf('\n', end)
+    if (nl === -1) break
+    const lineBytes = Buffer.byteLength(text.slice(end, nl + 1))
+    if (bytes + lineBytes > room) break
+    bytes += lineBytes
+    end = nl + 1
+  }
+  return { text: text.slice(0, end), bytes }
+}
+
+/** The first line of `text` (with its newline). */
+function firstLine(text: string): Lines {
+  const nl = text.indexOf('\n')
+  const line = nl === -1 ? text : text.slice(0, nl + 1)
+  return { text: line, bytes: Buffer.byteLength(line) }
 }
 
 /** Today's UTC day key (exported for tooling that needs to skip the active day). */
