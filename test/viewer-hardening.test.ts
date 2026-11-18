@@ -103,7 +103,7 @@ describe('local mode only answers loopback hosts', () => {
   })
 
   test('token mode does not depend on the host', async () => {
-    const v = createViewerHandler({ dir: fixture(), env: { LOGS_VIEWER_TOKEN: TOKEN } })
+    const v = createViewerHandler({ dir: fixture(), env: { LOG_VIEWER_TOKEN: TOKEN } })
     const res = await v.fetch(
       new Request('https://logs.example.test/_strutvane/logs/api/files', {
         headers: { authorization: `Bearer ${TOKEN}` },

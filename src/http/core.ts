@@ -1,4 +1,8 @@
 /**
+ * **Deprecated:** request logging belongs in `@strutvane/framework` (ADR-0022 §1: this package keeps
+ * only the viewer). It stays here, unchanged in behaviour, until the framework ships its own request
+ * logging, then it is removed. Inside a Strutvane app nothing here runs unless you mount an adapter.
+ *
  * Framework-agnostic request logging (RFC-0004 §1). Every adapter (Web, Node, Hono, Express) uses
  * these helpers, so all of them produce the same compact record:
  *
@@ -20,13 +24,15 @@
  * @module
  */
 import { randomUUID } from 'node:crypto'
-import type { Logger, LogLevel } from '@strutvane/contracts'
-import { log as defaultLogger } from '../default.ts'
-import { REDACTED, redactString } from '../redact.ts'
+import type { Logger, LogLevel } from '@strutvane/framework/contracts'
+import { createLogManager, REDACTED, redactString } from '@strutvane/framework/log'
 
 /** Options shared by every request-logging adapter. */
 export interface RequestLoggingOptions {
-  /** The logger to write to. Default: the package's default `log`. */
+  /**
+   * The logger to write to. Default: one shared log manager built from `.env` (`LOG_CHANNEL`,
+   * `LOG_PATH`, …), created on first use.
+   */
   readonly logger?: Logger
   /** Exact paths that are never logged. Default: `['/health', '/ready']`. */
   readonly ignore?: readonly string[]
@@ -59,6 +65,15 @@ export interface CompletedRequest {
   readonly aborted?: boolean
 }
 
+let shared: Logger | undefined
+
+/** The shared default logger (`createLogManager()` from the environment), created on first use. */
+function defaultLogger(): Logger {
+  // Drain on SIGTERM/SIGINT/beforeExit, so the last requests of a stopping server are written.
+  shared ??= createLogManager({ handleShutdown: true })
+  return shared
+}
+
 /** Apply defaults and validate options. */
 export function resolveRequestLogging(options: RequestLoggingOptions = {}): ResolvedRequestLogging {
   const slow = options.slowThresholdMs ?? 1_000
@@ -68,7 +83,7 @@ export function resolveRequestLogging(options: RequestLoggingOptions = {}): Reso
   if (!/^[a-z0-9-]{1,64}$/.test(header))
     throw new TypeError(`invalid request id header "${header}"`)
   return {
-    logger: options.logger ?? defaultLogger,
+    logger: options.logger ?? defaultLogger(),
     ignore: new Set(options.ignore ?? ['/health', '/ready']),
     slowThresholdMs: slow,
     requestIdHeader: header,

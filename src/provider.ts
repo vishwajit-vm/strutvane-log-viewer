@@ -1,180 +1,233 @@
 /**
- * `@strutvane/logs/provider`: the provider `strutvane.config.ts` registers in a Strutvane app.
+ * `@strutvane/log-viewer/provider`: the provider an app lists in `bootstrap/providers.ts` (the
+ * installer adds it). It mounts the viewer at `/_strutvane/logs` on top of the framework's own
+ * logging (ADR-0022): the files it shows are the ones `@strutvane/framework/log` writes.
  *
- * It connects logs to the app only through core (integration map: container tokens + hooks):
- * - binds `LoggerToken`, so every package logs through this logger;
- * - on `http.onRequest`, answers log-viewer requests (`/_strutvane/logs`) and notes the start
- *   time of every other request;
- * - on `http.onResponse`, writes one request-log line (method, path, status, duration). The path
- *   is the payload's `route` (the matched route template, e.g. `/api/v1/invoices/:id`) when the
- *   router knows it: a template carries no ids or tokens and groups requests per endpoint.
- *   Otherwise (no route matched, or an older framework) the raw path is logged through `safePath`
- *   (secrets redacted, token-like segments masked, length capped).
+ * It connects to the app only through the framework's public seams (integration map: container
+ * tokens and hooks), never through the framework's internals:
+ * - **`LogManagerToken`** gives the log directory and the file channels writing into it (their
+ *   names become the viewer's channel filter). Without a log manager the viewer reads `LOG_PATH`
+ *   (default `storage/logs`).
+ * - **`http.onRequest`** (handler `logViewer.serve`, after `auth.identity`): requests under the
+ *   viewer path are answered by the viewer, with the actor `@strutvane/auth` resolved, so the app's
+ *   gate can decide by user and role. Every other request passes through untouched.
  *
- * Channels come from `config/logging.ts` (`default`, `channels`, `deprecations`, `path`; ADR-0022),
- * filled in from the `LOG_*` environment, plus `requests` and `viewer`. The provider also points
- * the `Log` facade at this app's channels. The
- * viewer follows the RFC-0004 access rules: open when `APP_ENV=local` (for loopback hosts only,
- * and, when the payload carries `clientAddress`, for a loopback peer only),
- * otherwise only with `LOGS_VIEWER_TOKEN`, and a 404 (not a 403) for everyone else, so its
- * existence isn't revealed. `viewer.authorize`, `viewer.ipAllowList`, `viewer.scopeRecords` and
- * `viewer.onAudit` are passed through, from `config/logging.ts` or from
- * {@link createLogsProvider}'s options (which win). The IP allow-list is checked against the
- * hook payload's `clientAddress` (the socket peer, never a forwarded header); without it, an
- * allow-list denies access.
+ * **Access is closed by default** (see `viewer/access.ts`): open on loopback while
+ * `APP_ENV=local`, otherwise only with `LOG_VIEWER_TOKEN` or the gate the app grants, and a 404 for
+ * everyone else, so the viewer's existence isn't revealed. The gate is bound in the app's own
+ * service provider:
+ *
+ * ```ts
+ * import { LogViewerGateToken } from '@strutvane/log-viewer/provider'
+ * app.container.value(LogViewerGateToken, {
+ *   authorize: (_request, { actor }) => actor?.roles.includes('admin') === true,
+ * })
+ * ```
+ *
+ * Settings come from `config/log-viewer.ts` (key `logViewer` in `config/index.ts`; the installer
+ * writes both): `enabled`, `path`, `token` and `ipAllowList`. Code-only rules (`authorize`,
+ * `scopeRecords`, `onAudit`) come from the gate token or {@link createLogViewerProvider}'s options,
+ * because a config file may be cached as JSON (`config:cache`), which can't hold functions.
+ *
+ * Failure scenarios:
+ * - **No `config/log-viewer.ts`:** the defaults (enabled, `/_strutvane/logs`, the token from
+ *   `LOG_VIEWER_TOKEN`).
+ * - **An invalid setting** (a `path` with odd characters, a short token, a bad IP range): the boot
+ *   fails naming the setting, because a typo must never silently open (or close) the viewer.
+ * - **A gate that throws:** the request gets a 404 (fail closed).
  *
  * @module
  */
-import {
-  HTTP_HOOKS,
-  type HttpRequestHookPayload,
-  type HttpResponseHookPayload,
-} from '@strutvane/contracts'
+import { HTTP_HOOKS, type HttpRequestHookPayload } from '@strutvane/framework/contracts'
 import {
   type Application,
   defineProvider,
   HooksToken,
-  LoggerToken,
   type Provider,
-} from '@strutvane/core'
-import type { LoggingConfig } from './config.ts'
-import { setLogManager } from './default.ts'
-import { logCompletedRequest, pathOf, resolveRequestLogging, safePath } from './http/core.ts'
-import { createLogManager, type LogManager } from './manager.ts'
-import { createViewerHandler, type ViewerHandler, type ViewerOptions } from './viewer/handler.ts'
+  type Token,
+  token,
+} from '@strutvane/framework/core'
+import { type Env, LogManagerToken } from '@strutvane/framework/log'
+import { createViewerHandler, type ViewerOptions } from './viewer/handler.ts'
 
-/** Viewer access settings that can't come from the environment (functions and lists). */
+/** The viewer's access rules that only code can express (functions), plus the IP allow-list. */
 export type ViewerAccessOptions = Pick<
   ViewerOptions,
   'authorize' | 'ipAllowList' | 'scopeRecords' | 'onAudit'
 >
 
-/** `config/logging.ts`: the channels (see `LoggingConfig`) plus request logging and the viewer. */
-export interface AppLoggingConfig extends LoggingConfig {
-  readonly requests?: { readonly ignore?: readonly string[]; readonly slowThresholdMs?: number }
-  readonly viewer?: {
-    readonly enabled?: boolean
-    readonly path?: string
-    readonly token?: string
-  } & ViewerAccessOptions
-}
-
-/** Options for {@link createLogsProvider}. */
-export interface LogsProviderOptions {
-  /** Viewer access rules; each one set here overrides the same key in `config/logging.ts`. */
-  readonly viewer?: ViewerAccessOptions
-}
-
-const section = <T>(app: Application, name: string): T | undefined =>
-  (app.settings as Readonly<Record<string, unknown>>)[name] as T | undefined
-
 /**
- * Create the logs provider (a factory so every app and test gets fresh state).
+ * The gate the app grants: bind it in your service provider to decide who may open the viewer.
  *
  * @example
- * createLogsProvider({ viewer: { authorize: (req) => isAdmin(req), ipAllowList: ['10.0.0.0/8'] } })
+ * app.container.value(LogViewerGateToken, {
+ *   authorize: (_request, { actor }) => actor?.roles.includes('admin') === true,
+ * })
  */
-export function createLogsProvider(options: LogsProviderOptions = {}): Provider {
-  let logger: LogManager | undefined
+export const LogViewerGateToken: Token<ViewerAccessOptions> = token<ViewerAccessOptions>(
+  'strutvane.log-viewer.gate',
+)
+
+/**
+ * `config/log-viewer.ts`: the viewer's data-only settings.
+ *
+ * @example
+ * export default defineConfig((env) => ({
+ *   enabled: env.boolean('LOG_VIEWER_ENABLED', true),
+ *   path: '/_strutvane/logs',
+ *   token: env.optional('LOG_VIEWER_TOKEN'),
+ * }))
+ */
+export interface LogViewerConfig {
+  /** Serve the viewer at all. Default: `true` (still closed until access is granted). */
+  readonly enabled?: boolean
+  /** URL prefix. Default: `/_strutvane/logs`. */
+  readonly path?: string
+  /** Viewer token (at least 16 characters). Default: `LOG_VIEWER_TOKEN`. */
+  readonly token?: string
+  /** Client IPs or CIDR ranges allowed to reach the viewer. Default: no IP restriction. */
+  readonly ipAllowList?: readonly string[]
+}
+
+/** Options for {@link createLogViewerProvider}. */
+export interface LogViewerProviderOptions {
+  /** Access rules; each one set here overrides the same rule bound with {@link LogViewerGateToken}. */
+  readonly viewer?: ViewerAccessOptions
+  /** Environment to read (`APP_ENV`, `LOG_PATH`, `LOG_VIEWER_TOKEN`). Default: `process.env`. */
+  readonly env?: Env
+}
+
+/** The config key the installer registers `config/log-viewer.ts` under. */
+export const CONFIG_KEY = 'logViewer'
+
+/** Name of the `http.onRequest` handler, for other packages' ordering hints. */
+export const HOOK_NAME = 'logViewer.serve'
+
+/**
+ * Create the log viewer provider (a factory, so every app and test gets fresh state).
+ *
+ * @example
+ * // bootstrap/providers.ts
+ * import { createLogViewerProvider } from '@strutvane/log-viewer/provider'
+ * export default [AppServiceProvider, createLogViewerProvider({ viewer: { ipAllowList: ['10.0.0.0/8'] } })]
+ */
+export function createLogViewerProvider(options: LogViewerProviderOptions = {}): Provider {
   return defineProvider({
-    name: '@strutvane/logs',
-    register(app) {
-      const cfg = section<AppLoggingConfig>(app, 'logging') ?? {}
-      const root = section<{ root?: string }>(app, 'app')?.root ?? process.cwd()
-      logger = createLogManager({ config: channelsOf(cfg), root })
-      setLogManager(logger)
-      app.container.value(LoggerToken, logger)
+    name: '@strutvane/log-viewer',
+    register() {
+      // Nothing to bind: the gate token is the app's to bind, and an unbound one means "no gate".
     },
     boot(app) {
-      const cfg = section<AppLoggingConfig>(app, 'logging') ?? {}
-      const active = logger
-      if (!active) return
-      const requests = resolveRequestLogging({
-        logger: active,
-        ...(cfg.requests?.ignore ? { ignore: cfg.requests.ignore } : {}),
-        ...(cfg.requests?.slowThresholdMs !== undefined
-          ? { slowThresholdMs: cfg.requests.slowThresholdMs }
-          : {}),
-      })
-      let viewer: ViewerHandler | undefined
-      if (cfg.viewer?.enabled !== false) {
-        const dir = active.config.path
-        // Every file channel writing into the viewer's directory.
-        const bases = Object.values(active.config.channels).flatMap((c) =>
-          (c.driver === 'single' || c.driver === 'daily') && c.dir === dir ? [c.base] : [],
-        )
-        const access: ViewerAccessOptions = {
-          ...pickAccess(cfg.viewer ?? {}),
-          ...pickAccess(options.viewer ?? {}),
-        }
-        viewer = createViewerHandler({
-          dir,
-          bases: bases.length > 0 ? [...new Set(bases)] : ['strutvane'],
-          ...(cfg.viewer?.path ? { basePath: cfg.viewer.path } : {}),
-          ...(cfg.viewer?.token ? { token: cfg.viewer.token } : {}),
-          ...access,
-        })
+      const cfg = readConfig(app)
+      if (cfg.enabled === false) return
+      const env = options.env ?? process.env
+      const manager = app.container.has(LogManagerToken) ? app.make(LogManagerToken) : undefined
+      const gate = app.container.has(LogViewerGateToken) ? app.make(LogViewerGateToken) : {}
+      const access: ViewerAccessOptions = {
+        ...pickAccess(cfg.ipAllowList ? { ipAllowList: cfg.ipAllowList } : {}),
+        ...pickAccess(gate),
+        ...pickAccess(options.viewer ?? {}),
       }
-      const started = new WeakMap<Request, number>()
-      const hooks = app.make(HooksToken)
-      hooks.on(
+      const appEnv = manager?.config.env ?? env['APP_ENV']
+      const files = manager === undefined ? undefined : fileChannels(manager.config)
+      const viewer = createViewerHandler({
+        ...(files === undefined
+          ? {}
+          : { dir: files.dir, bases: files.bases, channels: files.channels }),
+        ...(cfg.path === undefined ? {} : { basePath: cfg.path }),
+        ...(cfg.token === undefined || cfg.token === '' ? {} : { token: cfg.token }),
+        env: appEnv === undefined ? env : { ...env, APP_ENV: appEnv },
+        ...access,
+      })
+      app.make(HooksToken).on(
         HTTP_HOOKS.request,
         async (payload, control) => {
           const p = payload as HttpRequestHookPayload
-          started.set(p.request, performance.now())
-          if (!viewer?.matches(p.request)) return undefined
+          if (!viewer.matches(p.request)) return undefined
           control.stop()
-          const info = p.clientAddress === undefined ? {} : { ip: p.clientAddress }
           const answered: HttpRequestHookPayload = {
             ...p,
-            response: await viewer.fetch(p.request, info),
+            response: await viewer.fetch(p.request, {
+              actor: p.actor,
+              ...(p.clientAddress === undefined ? {} : { ip: p.clientAddress }),
+            }),
           }
           return answered
         },
-        { name: 'logs.requests', before: ['auth.identity'] },
+        { name: HOOK_NAME, after: ['auth.identity'] },
       )
-      hooks.on(
-        HTTP_HOOKS.response,
-        (payload) => {
-          const p = payload as HttpResponseHookPayload
-          const begin = started.get(p.request)
-          if (begin === undefined || viewer?.matches(p.request)) return undefined
-          const path = pathOf(p.request.url)
-          if (requests.ignore.has(path)) return undefined
-          // A route template is safe as is (the router defines it, not the client); an empty
-          // string is treated as unknown.
-          const route = p.route ? p.route : safePath(path)
-          logCompletedRequest(
-            { ...requests, logger: active.child({ requestId: p.requestId }) },
-            {
-              method: p.request.method,
-              route,
-              status: p.status,
-              durationMs: performance.now() - begin,
-            },
-          )
-          return undefined
-        },
-        { name: 'logs.requests', failSoft: true },
-      )
-    },
-    async shutdown() {
-      await logger?.flush()
     },
   })
 }
 
-/** The channel part of `config/logging.ts` (request and viewer settings are the provider's). */
-function channelsOf(cfg: AppLoggingConfig): LoggingConfig {
+/** What the provider needs from the resolved `config/logging`. */
+interface LoggingFacts {
+  readonly path: string
+  readonly channels: Readonly<
+    Record<string, { readonly driver: string; readonly dir?: string; readonly base?: string }>
+  >
+}
+
+/** The file channels writing into the default log directory, as the viewer's bases and channels. */
+export function fileChannels(config: LoggingFacts): {
+  readonly dir: string
+  readonly bases: readonly string[]
+  readonly channels: Readonly<Record<string, string>>
+} {
+  const channels: Record<string, string> = {}
+  for (const [name, channel] of Object.entries(config.channels)) {
+    if (
+      (channel.driver === 'single' || channel.driver === 'daily') &&
+      channel.dir === config.path &&
+      channel.base !== undefined
+    )
+      channels[name] = channel.base
+  }
+  const bases = [...new Set(Object.values(channels))]
+  return bases.length > 0
+    ? { dir: config.path, bases, channels }
+    : { dir: config.path, bases: ['strutvane'], channels: {} }
+}
+
+/**
+ * Read and check `config('logViewer')`. Absent is fine (the defaults); a value of the wrong type is
+ * a boot error naming the setting.
+ *
+ * @example
+ * readConfig({ settings: { logViewer: { enabled: false } } }) // { enabled: false }
+ */
+export function readConfig(app: Pick<Application, 'settings'>): LogViewerConfig {
+  const value: unknown = Reflect.get(app.settings, CONFIG_KEY)
+  if (value === undefined || value === null) return {}
+  if (typeof value !== 'object' || Array.isArray(value))
+    throw new TypeError(
+      'config/log-viewer.ts must export an object of settings (enabled, path, token, ipAllowList)',
+    )
+  const read = (key: string): unknown => Reflect.get(value, key)
+  const enabled = read('enabled')
+  const path = read('path')
+  const tokenValue = read('token')
+  const ipAllowList = read('ipAllowList')
+  if (enabled !== undefined && typeof enabled !== 'boolean')
+    throw new TypeError('config/log-viewer.ts: enabled must be true or false')
+  if (path !== undefined && typeof path !== 'string')
+    throw new TypeError('config/log-viewer.ts: path must be a URL path like /_strutvane/logs')
+  if (tokenValue !== undefined && tokenValue !== null && typeof tokenValue !== 'string')
+    throw new TypeError('config/log-viewer.ts: token must be a string (LOG_VIEWER_TOKEN)')
+  if (
+    ipAllowList !== undefined &&
+    (!Array.isArray(ipAllowList) || ipAllowList.some((entry) => typeof entry !== 'string'))
+  )
+    throw new TypeError('config/log-viewer.ts: ipAllowList must be a list of IPs or CIDR ranges')
   return {
-    ...(cfg.default === undefined ? {} : { default: cfg.default }),
-    ...(cfg.channels === undefined ? {} : { channels: cfg.channels }),
-    ...(cfg.deprecations === undefined ? {} : { deprecations: cfg.deprecations }),
-    ...(cfg.path === undefined ? {} : { path: cfg.path }),
+    ...(enabled === undefined ? {} : { enabled }),
+    ...(path === undefined ? {} : { path }),
+    ...(typeof tokenValue === 'string' ? { token: tokenValue } : {}),
+    ...(ipAllowList === undefined ? {} : { ipAllowList: ipAllowList as readonly string[] }),
   }
 }
 
-/** Keep only the viewer access keys that are actually set. */
+/** Keep only the access keys that are actually set. */
 function pickAccess(source: ViewerAccessOptions): ViewerAccessOptions {
   return {
     ...(source.authorize ? { authorize: source.authorize } : {}),
@@ -184,6 +237,6 @@ function pickAccess(source: ViewerAccessOptions): ViewerAccessOptions {
   }
 }
 
-/** The logs provider for `strutvane.config.ts`. */
-const provider: Provider = createLogsProvider()
+/** The log viewer provider for `bootstrap/providers.ts`. */
+const provider: Provider = createLogViewerProvider()
 export default provider

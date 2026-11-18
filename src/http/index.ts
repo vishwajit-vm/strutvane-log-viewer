@@ -1,15 +1,15 @@
 /**
- * `@strutvane/logs/http`: request logging for any framework built on the Web `Request` /
+ * `@strutvane/log-viewer/http`: request logging for any framework built on the Web `Request` /
  * `Response` API (Hono, Next.js route handlers, Deno-style servers, `fetch` handlers…).
  *
  * @example
- * import { createRequestLogger } from '@strutvane/logs/http'
+ * import { createRequestLogger } from '@strutvane/log-viewer/http'
  * const requests = createRequestLogger()
  * export default { fetch: (req: Request) => requests.handle(req, (r) => app.fetch(r)) }
  *
  * @module
  */
-import { runWithLogContext } from '../context.ts'
+import { runWithLogContext } from '@strutvane/framework/log'
 import {
   type CompletedRequest,
   logCompletedRequest,

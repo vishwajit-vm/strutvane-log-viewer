@@ -1,9 +1,9 @@
 /**
- * `@strutvane/logs/express`: request logging and the log viewer for Express 5 apps.
+ * `@strutvane/log-viewer/express`: request logging and the log viewer for Express 5 apps.
  *
  * @example
  * import express from 'express'
- * import { logs, errorLogging } from '@strutvane/logs/express'
+ * import { logs, errorLogging } from '@strutvane/log-viewer/express'
  * const app = express()
  * app.use(logs())          // request logging + viewer at /_strutvane/logs (locked down by default)
  * // … routes …
@@ -11,8 +11,9 @@
  *
  * @module
  */
+
+import { runWithLogContext } from '@strutvane/framework/log'
 import type { ErrorRequestHandler, Request, RequestHandler } from 'express'
-import { runWithLogContext } from '../context.ts'
 import {
   loggedPath,
   pathOf,

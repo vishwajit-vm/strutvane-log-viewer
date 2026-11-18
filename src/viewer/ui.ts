@@ -12,7 +12,7 @@
  *
  * @module
  */
-import { LEVELS as LEVEL_NAMES } from '../levels.ts'
+import { LEVELS as LEVEL_NAMES } from '@strutvane/framework/log'
 
 /** Escape text for an HTML attribute value or text node. */
 export function escapeHtml(value: string): string {
@@ -82,6 +82,7 @@ const SCRIPT = `
   var $ = function (id) { return document.getElementById(id); };
   var rows = $('rows'), status = $('message'), more = $('more');
   var cursor = null, source = null, csrf = null, MAX_ROWS = 2000;
+  var LEVEL_COUNT = document.querySelectorAll('input[name=level]').length;
 
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -126,7 +127,9 @@ const SCRIPT = `
     var p = new URLSearchParams();
     var levels = Array.prototype.filter.call(document.querySelectorAll('input[name=level]'), function (c) { return c.checked; })
       .map(function (c) { return c.value; });
-    if (levels.length && levels.length < 6) p.set('level', levels.join(','));
+    if (levels.length && levels.length < LEVEL_COUNT) p.set('level', levels.join(','));
+    var channel = $('channel').value;
+    if (channel) p.set('channel', channel);
     ['q', 'route', 'status', 'requestId'].forEach(function (k) { var v = $(k).value.trim(); if (v) p.set(k, v); });
     var from = $('from').value, to = $('to').value;
     if (from) p.set('from', new Date(from).toISOString());
@@ -175,6 +178,15 @@ const SCRIPT = `
     var list = $('files');
     api('files').then(function (body) {
       list.replaceChildren();
+      var select = $('channel'), chosen = select.value;
+      if (select.options.length <= 1 && Array.isArray(body.channels)) {
+        body.channels.forEach(function (name) {
+          var option = el('option', null, name);
+          option.value = String(name);
+          select.appendChild(option);
+        });
+        select.value = chosen;
+      }
       var days = [];
       body.files.forEach(function (f) { if (days.indexOf(f.day) === -1) days.push(f.day); });
       if (!days.length) list.appendChild(el('li', null, 'No log files yet.'));
@@ -188,7 +200,9 @@ const SCRIPT = `
         }
         ['ndjson', 'csv'].forEach(function (format) {
           var a = el('a', null, 'Download ' + format.toUpperCase());
-          a.href = base + '/api/download?day=' + encodeURIComponent(day) + '&format=' + format;
+          var channel = $('channel').value;
+          a.href = base + '/api/download?day=' + encodeURIComponent(day) + '&format=' + format +
+            (channel ? '&channel=' + encodeURIComponent(channel) : '');
           a.setAttribute('download', '');
           li.appendChild(a);
         });
@@ -276,6 +290,7 @@ export function renderViewerPage(options: {
 <main>
 <form id="filters" class="filters" role="search">
 ${levelBoxes}
+<label for="channel"><span>Channel</span><select id="channel"><option value="">All channels</option></select></label>
 <label for="q"><span>Search</span><input id="q" type="search" maxlength="200" placeholder="text in message or fields"></label>
 <label for="route"><span>Route</span><input id="route" maxlength="200" placeholder="/invoices/:id"></label>
 <label for="status"><span>Status</span><input id="status" maxlength="3" size="4" placeholder="5xx"></label>

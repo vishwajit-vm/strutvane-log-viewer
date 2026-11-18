@@ -23,7 +23,7 @@
  * @module
  */
 import { join } from 'node:path'
-import type { Sanitizer } from '../redact.ts'
+import type { Sanitizer } from '@strutvane/framework/log'
 import type { RecordFilter, RecordQuery } from './filters.ts'
 import { accept, cleanLine, describeFiles, readRange, viewerSanitizer } from './store.ts'
 

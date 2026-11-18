@@ -1,17 +1,17 @@
 /**
- * `@strutvane/logs/node`: request logging and viewer serving for plain `node:http` servers. It is
+ * `@strutvane/log-viewer/node`: request logging and viewer serving for plain `node:http` servers. It is
  * also the base of the Express adapter.
  *
  * @example
  * import { createServer } from 'node:http'
- * import { withRequestLogging } from '@strutvane/logs/node'
+ * import { withRequestLogging } from '@strutvane/log-viewer/node'
  * createServer(withRequestLogging((req, res) => res.end('ok'))).listen(3000)
  *
  * @module
  */
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http'
 import { Readable } from 'node:stream'
-import { runWithLogContext } from '../context.ts'
+import { runWithLogContext } from '@strutvane/framework/log'
 import {
   logCompletedRequest,
   loggedPath,

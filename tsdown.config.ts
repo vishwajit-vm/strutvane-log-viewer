@@ -1,15 +1,19 @@
 import { defineConfig } from 'tsdown'
 
+// Entry points: the root (the viewer's read API and Web handler), `./react` (the screen and its
+// browser-safe client), `./provider` and `./installer` (the Strutvane app integration), and the
+// deprecated request-logging adapters. The framework, React, Hono and Express are peer
+// dependencies and stay external.
 export default defineConfig({
   entry: {
     index: 'src/index.ts',
+    'react/index': 'src/react/index.ts',
+    provider: 'src/provider.ts',
+    installer: 'src/installer.ts',
     http: 'src/http/index.ts',
     node: 'src/adapters/node.ts',
     hono: 'src/adapters/hono.ts',
     express: 'src/adapters/express.ts',
-    viewer: 'src/viewer/index.ts',
-    provider: 'src/provider.ts',
-    commands: 'src/commands/index.ts',
   },
   format: 'esm',
   platform: 'node',
@@ -17,6 +21,5 @@ export default defineConfig({
   dts: true,
   sourcemap: true,
   clean: true,
-  // dependencies and peerDependencies (contracts, hono, express) are never bundled by default.
-  deps: { neverBundle: ['hono', 'express', '@strutvane/contracts', '@strutvane/core'] },
+  deps: { neverBundle: ['hono', 'express', 'react', 'react-dom', /^@strutvane\/framework/] },
 })

@@ -1,16 +1,17 @@
 /**
- * `@strutvane/logs/hono`: request logging and the log viewer for Hono apps.
+ * `@strutvane/log-viewer/hono`: request logging and the log viewer for Hono apps.
  *
  * @example
  * import { Hono } from 'hono'
- * import { logs } from '@strutvane/logs/hono'
+ * import { logs } from '@strutvane/log-viewer/hono'
  * const app = new Hono()
  * app.use(logs())   // request logging + viewer at /_strutvane/logs (locked down by default)
  *
  * @module
  */
+
+import { runWithLogContext } from '@strutvane/framework/log'
 import type { Context, MiddlewareHandler } from 'hono'
-import { runWithLogContext } from '../context.ts'
 import {
   logCompletedRequest,
   type RequestLoggingOptions,

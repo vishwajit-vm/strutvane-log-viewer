@@ -129,7 +129,7 @@ describe('access control', () => {
   })
 
   test('token mode: bearer works, wrong or missing token is 401', async () => {
-    const v = createViewerHandler({ dir: fixture(), env: { LOGS_VIEWER_TOKEN: TOKEN } })
+    const v = createViewerHandler({ dir: fixture(), env: { LOG_VIEWER_TOKEN: TOKEN } })
     const ok = await v.fetch(
       new Request(`${BASE}/api/files`, { headers: { authorization: `Bearer ${TOKEN}` } }),
     )
@@ -198,7 +198,7 @@ describe('access control', () => {
 
   test('short tokens: an explicit one throws, one from the environment keeps the viewer closed', async () => {
     expect(() => createViewerHandler({ token: 'short', env: {} })).toThrow(TypeError)
-    const v = createViewerHandler({ dir: fixture(), env: { LOGS_VIEWER_TOKEN: 'short' } })
+    const v = createViewerHandler({ dir: fixture(), env: { LOG_VIEWER_TOKEN: 'short' } })
     expect(
       (await v.fetch(new Request(BASE, { headers: { authorization: 'Bearer short' } }))).status,
     ).toBe(404)

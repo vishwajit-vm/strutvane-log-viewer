@@ -7,10 +7,9 @@
  */
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { formatLine, serializeRecord } from '@strutvane/framework/log'
 import fc from 'fast-check'
 import { afterEach, describe, expect, test } from 'vitest'
-import { formatLine } from '../src/format/line.ts'
-import { serializeRecord } from '../src/serialize.ts'
 import { type Cursor, decodeCursor, encodeCursor, readPage } from '../src/viewer/store.ts'
 import { tempDir } from './helpers.ts'
 

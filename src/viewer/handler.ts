@@ -22,8 +22,16 @@
  */
 import { createHmac, randomBytes } from 'node:crypto'
 import { resolve } from 'node:path'
-import { type Env, resolveLogPath } from '../config.ts'
-import { clearLogFiles, DEFAULT_LOG_BASE, dayKeyOf, isDayKey, isLogBaseName } from '../files.ts'
+import type { Actor } from '@strutvane/framework/contracts'
+import {
+  clearLogFiles,
+  DEFAULT_LOG_BASE,
+  dayKeyOf,
+  type Env,
+  isDayKey,
+  isLogBaseName,
+  resolveLogPath,
+} from '@strutvane/framework/log'
 import {
   type AccessPolicy,
   type AuthorizeFn,
@@ -67,11 +75,18 @@ export interface ViewerOptions {
    * `['strutvane']`. Other files in the directory are never shown or deleted.
    */
   readonly bases?: readonly string[]
+  /**
+   * Channel names and the file base each one writes (the `single` and `daily` channels of
+   * `config/logging.ts` that write into `dir`), so a search can be narrowed to one channel
+   * (`?channel=payments`). Every base must also be in `bases`. Default: each base is a channel of
+   * the same name.
+   */
+  readonly channels?: Readonly<Record<string, string>>
   /** URL prefix. Default: `/_strutvane/logs`. Letters, digits, `/`, `_` and `-` only. */
   readonly basePath?: string
   /** Your own access rule. When set, it replaces the local/token rules. */
   readonly authorize?: AuthorizeFn
-  /** Viewer token (≥ 16 characters). Default: `LOGS_VIEWER_TOKEN`. */
+  /** Viewer token (≥ 16 characters). Default: `LOG_VIEWER_TOKEN`. */
   readonly token?: string
   /** Client IPs or CIDR ranges allowed to reach the viewer (all modes). Default: no IP restriction. */
   readonly ipAllowList?: readonly string[]
@@ -95,7 +110,7 @@ export interface ViewerOptions {
   readonly heartbeatMs?: number
   /** Lines examined per search request before returning a cursor. Default: 100,000. */
   readonly maxScanLines?: number
-  /** Environment to read (`APP_ENV`, `LOG_PATH`, `LOGS_VIEWER_TOKEN`). Default: `process.env`. */
+  /** Environment to read (`APP_ENV`, `LOG_PATH`, `LOG_VIEWER_TOKEN`). Default: `process.env`. */
   readonly env?: Env
   /** Clock, for tests. */
   readonly now?: () => number
@@ -108,6 +123,11 @@ export interface ViewerRequestInfo {
    * mode, required to be a loopback address when given.
    */
   readonly ip?: string
+  /**
+   * The signed-in actor, when the app resolved one (passed to `authorize`). The provider fills it
+   * from the `http.onRequest` payload after `@strutvane/auth` identified the caller.
+   */
+  readonly actor?: Actor | null
 }
 
 /** The mounted viewer. */
@@ -125,14 +145,37 @@ const BASE_PATH = /^\/[A-Za-z0-9/_-]*$/
 const MAX_BODY_BYTES = 4096
 const MAX_LIMIT = 500
 
+/**
+ * The stable, lowercase `snake_case` problem codes the viewer answers with (RFC-0003). Shared
+ * framework codes where one fits; `invalid_query`, `invalid_body`, `method_not_allowed` and
+ * `unsupported_media_type` are the viewer's own.
+ */
+export type ViewerProblemCode =
+  | 'invalid_query'
+  | 'invalid_body'
+  | 'unauthenticated'
+  | 'forbidden'
+  | 'method_not_allowed'
+  | 'payload_too_large'
+  | 'unsupported_media_type'
+  | 'rate_limited'
+  | 'internal_error'
+
 function problem(
   status: number,
+  code: ViewerProblemCode,
   title: string,
   detail?: string,
 ): { status: number; body: Record<string, unknown> } {
   return {
     status,
-    body: { type: 'about:blank', title, status, ...(detail === undefined ? {} : { detail }) },
+    body: {
+      type: 'about:blank',
+      title,
+      status,
+      code,
+      ...(detail === undefined ? {} : { detail }),
+    },
   }
 }
 
@@ -162,11 +205,12 @@ function json(status: number, value: unknown, headers: Record<string, string> = 
 
 function fail(
   status: number,
+  code: ViewerProblemCode,
   title: string,
   detail?: string,
   headers: Record<string, string> = {},
 ): Response {
-  const p = problem(status, title, detail)
+  const p = problem(status, code, title, detail)
   return json(p.status, p.body, headers)
 }
 
@@ -208,7 +252,7 @@ interface ClearBody {
  * Create the log viewer handler.
  *
  * @example
- * const viewer = createViewerHandler({ authorize: (req) => isAdmin(req) })
+ * const viewer = createViewerHandler({ authorize: (_req, { actor }) => actor?.roles.includes('admin') === true })
  * // in any Web-standard server:
  * if (viewer.matches(request)) return viewer.fetch(request, { ip })
  *
@@ -229,6 +273,23 @@ export function createViewerHandler(options: ViewerOptions = {}): ViewerHandler 
     if (!isLogBaseName(base))
       throw new TypeError(`invalid viewer base name "${base}": use letters, digits and _`)
   }
+  const channelBases = new Map<string, string>()
+  for (const [channel, base] of Object.entries(options.channels ?? {})) {
+    if (!bases.has(base))
+      throw new TypeError(
+        `viewer channel "${channel}" writes "${base}", which is not one of the viewer bases`,
+      )
+    channelBases.set(channel, base)
+  }
+  if (channelBases.size === 0) for (const base of bases) channelBases.set(base, base)
+  /** The bases a request reads: one channel's (`?channel=`), or all of them. */
+  const basesFor = (url: URL): ReadonlySet<string> => {
+    const channel = url.searchParams.get('channel')
+    if (channel === null || channel === '') return bases
+    const base = channelBases.get(channel)
+    if (base === undefined) throw new QueryError(`unknown channel "${channel.slice(0, 64)}"`)
+    return new Set([base])
+  }
   const maxTails = options.maxTails ?? 5
   if (!Number.isInteger(maxTails) || maxTails < 0)
     throw new RangeError('maxTails must be a non-negative integer')
@@ -245,7 +306,7 @@ export function createViewerHandler(options: ViewerOptions = {}): ViewerHandler 
   }
   // CSRF token: random per handler instance, readable only by an authorised same-origin page.
   const csrfToken = createHmac('sha256', randomBytes(32))
-    .update('strutvane-logs-csrf')
+    .update('strutvane-log-viewer-csrf')
     .digest('base64url')
   let activeTails = 0
 
@@ -281,30 +342,37 @@ export function createViewerHandler(options: ViewerOptions = {}): ViewerHandler 
    * The file list. A scoped viewer (e.g. one tenant) sees only which days exist: file names, sizes
    * and modification times describe everyone's activity, not just its own records.
    */
-  const files = async (scoped: boolean): Promise<Response> => {
-    const all = await describeFiles(dir, bases)
-    if (!scoped) return json(200, { files: all })
+  const files = async (selected: ReadonlySet<string>, scoped: boolean): Promise<Response> => {
+    const all = await describeFiles(dir, selected)
+    const channels = [...channelBases.keys()]
+    if (!scoped) return json(200, { files: all, channels })
     const days = [...new Set(all.map((f) => f.day))]
-    return json(200, { files: days.map((day) => ({ day })), scoped: true })
+    return json(200, { files: days.map((day) => ({ day })), channels, scoped: true })
   }
 
   const records = async (
     url: URL,
+    selected: ReadonlySet<string>,
     query: RecordQuery,
     scope: RecordFilter | undefined,
   ): Promise<Response> => {
     const limitText = url.searchParams.get('limit')
     const limit = limitText === null ? 100 : Number(limitText)
     if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
-      return fail(400, 'Invalid query', `limit must be an integer from 1 to ${MAX_LIMIT}`)
+      return fail(
+        400,
+        'invalid_query',
+        'Invalid query',
+        `limit must be an integer from 1 to ${MAX_LIMIT}`,
+      )
     }
     const cursorText = url.searchParams.get('cursor')
     const cursor = cursorText === null ? undefined : decodeCursor(cursorText)
     if (cursorText !== null && cursor === undefined)
-      return fail(400, 'Invalid query', 'cursor is invalid')
+      return fail(400, 'invalid_query', 'Invalid query', 'cursor is invalid')
     const result = await readPage({
       dir,
-      bases,
+      bases: selected,
       query,
       scope,
       limit,
@@ -316,17 +384,19 @@ export function createViewerHandler(options: ViewerOptions = {}): ViewerHandler 
 
   const download = (
     url: URL,
+    selected: ReadonlySet<string>,
     query: RecordQuery,
     scope: RecordFilter | undefined,
     ip: string | undefined,
   ): Response => {
     const day = url.searchParams.get('day') ?? ''
-    if (!isDayKey(day)) return fail(400, 'Invalid query', 'day must be a date like 2026-11-14')
+    if (!isDayKey(day))
+      return fail(400, 'invalid_query', 'Invalid query', 'day must be a date like 2026-11-14')
     const format = url.searchParams.get('format') ?? 'ndjson'
     if (format !== 'ndjson' && format !== 'csv')
-      return fail(400, 'Invalid query', 'format must be ndjson or csv')
+      return fail(400, 'invalid_query', 'Invalid query', 'format must be ndjson or csv')
     const encoder = new TextEncoder()
-    const lines = readDayLines(dir, day, bases)
+    const lines = readDayLines(dir, day, selected)
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         if (format === 'csv') controller.enqueue(encoder.encode(csvHeader()))
@@ -366,13 +436,20 @@ export function createViewerHandler(options: ViewerOptions = {}): ViewerHandler 
 
   const tail = (
     request: Request,
+    selected: ReadonlySet<string>,
     query: RecordQuery,
     scope: RecordFilter | undefined,
   ): Response => {
     if (activeTails >= maxTails) {
-      return fail(429, 'Too many live tails', `at most ${maxTails} live tails may run at once`, {
-        'retry-after': '10',
-      })
+      return fail(
+        429,
+        'rate_limited',
+        'Too many live tails',
+        `at most ${maxTails} live tails may run at once`,
+        {
+          'retry-after': '10',
+        },
+      )
     }
     activeTails++
     // Release exactly once, whichever path ends the tail (including a throw right here).
@@ -385,7 +462,7 @@ export function createViewerHandler(options: ViewerOptions = {}): ViewerHandler 
     try {
       const stream = createTailStream({
         dir,
-        bases,
+        bases: selected,
         query,
         scope,
         signal: request.signal,
@@ -410,21 +487,21 @@ export function createViewerHandler(options: ViewerOptions = {}): ViewerHandler 
     scoped: boolean,
     ip: string | undefined,
   ): Promise<Response> => {
-    if (scoped) return fail(403, 'Forbidden', 'scoped viewers cannot clear logs')
+    if (scoped) return fail(403, 'forbidden', 'Forbidden', 'scoped viewers cannot clear logs')
     const origin = request.headers.get('origin')
     if (origin !== null && origin !== url.origin)
-      return fail(403, 'Forbidden', 'cross-origin request')
+      return fail(403, 'forbidden', 'Forbidden', 'cross-origin request')
     const site = request.headers.get('sec-fetch-site')
     if (site !== null && site !== 'same-origin' && site !== 'none')
-      return fail(403, 'Forbidden', 'cross-site request')
+      return fail(403, 'forbidden', 'Forbidden', 'cross-site request')
     const given = request.headers.get('x-csrf-token')
     if (given === null || !safeEqual(given, csrfToken))
-      return fail(403, 'Forbidden', 'missing or invalid CSRF token')
+      return fail(403, 'forbidden', 'Forbidden', 'missing or invalid CSRF token')
     if (!(request.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) {
-      return fail(415, 'Unsupported media type', 'send application/json')
+      return fail(415, 'unsupported_media_type', 'Unsupported media type', 'send application/json')
     }
     const text = await readBody(request, MAX_BODY_BYTES)
-    if (text === undefined) return fail(413, 'Payload too large')
+    if (text === undefined) return fail(413, 'payload_too_large', 'Payload too large')
     let body: ClearBody
     try {
       const parsed: unknown = JSON.parse(text)
@@ -432,14 +509,15 @@ export function createViewerHandler(options: ViewerOptions = {}): ViewerHandler 
         throw new Error('not an object')
       body = parsed
     } catch {
-      return fail(400, 'Invalid body', 'body must be a JSON object')
+      return fail(400, 'invalid_body', 'Invalid body', 'body must be a JSON object')
     }
-    if (body.confirm !== 'DELETE') return fail(400, 'Invalid body', 'confirm must be "DELETE"')
+    if (body.confirm !== 'DELETE')
+      return fail(400, 'invalid_body', 'Invalid body', 'confirm must be "DELETE"')
     const today = dayKeyOf(now())
     let before = today
     if (body.before !== undefined) {
       if (typeof body.before !== 'string' || !isDayKey(body.before)) {
-        return fail(400, 'Invalid body', 'before must be a date like 2026-11-14')
+        return fail(400, 'invalid_body', 'Invalid body', 'before must be a date like 2026-11-14')
       }
       // Today's files are never deleted: active writers append to them.
       if (body.before < today) before = body.before
@@ -461,14 +539,14 @@ export function createViewerHandler(options: ViewerOptions = {}): ViewerHandler 
     const sub = url.pathname.slice(basePath.length) || '/'
     const isPage = sub === '/'
 
-    const decision = await decideAccess(policy, request, info.ip, isPage)
+    const decision = await decideAccess(policy, request, info.ip, isPage, info.actor ?? null)
     if (decision.kind === 'hidden') return notFound()
     if (decision.kind === 'login') {
       return respond(303, null, { location: basePath, 'set-cookie': decision.cookie })
     }
     if (decision.kind === 'unauthenticated') {
-      return fail(401, 'Unauthorized', 'a valid viewer token is required', {
-        'www-authenticate': 'Bearer realm="strutvane-logs"',
+      return fail(401, 'unauthenticated', 'Unauthorized', 'a valid viewer token is required', {
+        'www-authenticate': 'Bearer realm="strutvane-log-viewer"',
       })
     }
 
@@ -496,23 +574,27 @@ export function createViewerHandler(options: ViewerOptions = {}): ViewerHandler 
     const allowed = sub === '/api/clear' ? 'POST' : getOnly ? 'GET' : 'GET, HEAD'
     const methodOk =
       sub === '/api/clear' ? request.method === 'POST' : getOnly ? request.method === 'GET' : isGet
-    if (!methodOk) return fail(405, 'Method not allowed', undefined, { allow: allowed })
+    if (!methodOk)
+      return fail(405, 'method_not_allowed', 'Method not allowed', undefined, { allow: allowed })
 
     if (isPage) return page()
     if (sub === '/api/session') return json(200, { csrfToken })
-    if (sub === '/api/files') return files(scope !== undefined)
     if (sub === '/api/clear') return clear(request, url, scope !== undefined, info.ip)
 
     let query: RecordQuery
+    let selected: ReadonlySet<string>
     try {
+      selected = basesFor(url)
+      if (sub === '/api/files') return files(selected, scope !== undefined)
       query = parseRecordQuery(url.searchParams)
     } catch (error) {
-      if (error instanceof QueryError) return fail(400, 'Invalid query', error.message)
+      if (error instanceof QueryError)
+        return fail(400, 'invalid_query', 'Invalid query', error.message)
       throw error
     }
-    if (sub === '/api/records') return records(url, query, scope)
-    if (sub === '/api/download') return download(url, query, scope, info.ip)
-    return tail(request, query, scope)
+    if (sub === '/api/records') return records(url, selected, query, scope)
+    if (sub === '/api/download') return download(url, selected, query, scope, info.ip)
+    return tail(request, selected, query, scope)
   }
 
   return {
@@ -529,7 +611,7 @@ export function createViewerHandler(options: ViewerOptions = {}): ViewerHandler 
       try {
         return await handle(request, info)
       } catch {
-        return fail(500, 'Internal Server Error')
+        return fail(500, 'internal_error', 'Internal Server Error')
       }
     },
   }

@@ -1,9 +1,13 @@
 /** Request logging: the core, the Web handler, and the Node, Hono and Express adapters. */
+
+import { existsSync, readFileSync } from 'node:fs'
 import { createServer, type RequestListener, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { join } from 'node:path'
+import { createPipelineLogger, getLogContext, type StrutvaneLogger } from '@strutvane/framework/log'
 import express from 'express'
 import { Hono } from 'hono'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import * as expressAdapter from '../src/adapters/express.ts'
 import * as honoAdapter from '../src/adapters/hono.ts'
 import {
@@ -12,8 +16,6 @@ import {
   toWebRequest,
   withRequestLogging,
 } from '../src/adapters/node.ts'
-import { getLogContext } from '../src/context.ts'
-import { setLogManager } from '../src/default.ts'
 import {
   createRequestLogger,
   levelFor,
@@ -23,9 +25,7 @@ import {
   resolveRequestLogging,
   sizeFrom,
 } from '../src/http/index.ts'
-import { createPipelineLogger, type StrutvaneLogger } from '../src/logger.ts'
-import { createLogManager } from '../src/manager.ts'
-import { memoryTransport, type Rec, waitFor } from './helpers.ts'
+import { memoryTransport, type Rec, tempDir, waitFor } from './helpers.ts'
 
 function capture(): { logger: StrutvaneLogger; records: () => Promise<Rec[]> } {
   const t = memoryTransport()
@@ -42,7 +42,6 @@ function capture(): { logger: StrutvaneLogger; records: () => Promise<Rec[]> } {
 const servers: Server[] = []
 afterEach(async () => {
   for (const s of servers.splice(0)) await new Promise((r) => s.close(r))
-  setLogManager(undefined)
 })
 
 async function listen(listener: RequestListener): Promise<string> {
@@ -168,19 +167,26 @@ describe('Web handler (createRequestLogger)', () => {
     })
   })
 
-  test('uses the default logger when none is given', async () => {
-    const t = memoryTransport()
-    const manager = createLogManager({
-      config: {
-        default: 'mem',
-        channels: { mem: { driver: 'custom', via: () => t, format: 'json' } },
-      },
-      env: {},
-    })
-    setLogManager(manager)
-    await createRequestLogger().handle(new Request('http://x/d'), () => new Response('ok'))
-    await manager.flush()
-    await waitFor(() => t.records().length === 1)
+  test('uses a log manager built from .env when no logger is given', async () => {
+    // A fresh module, so the shared default logger is built from this test's environment, in a
+    // temp project root (relative LOG_PATHs resolve against the working directory).
+    vi.resetModules()
+    const { dir, cleanup } = tempDir()
+    vi.spyOn(process, 'cwd').mockReturnValue(dir)
+    vi.stubEnv('LOG_CHANNEL', 'single')
+    vi.stubEnv('LOG_FORMAT', 'json')
+    try {
+      const fresh = await import('../src/http/index.ts')
+      await fresh.createRequestLogger().handle(new Request('http://x/d'), () => new Response('ok'))
+      const logs = join(dir, 'storage', 'logs')
+      const written = (): string =>
+        existsSync(join(logs, 'strutvane.log'))
+          ? readFileSync(join(logs, 'strutvane.log'), 'utf8')
+          : ''
+      await waitFor(() => written().includes('"msg":"GET /d 200"'))
+    } finally {
+      cleanup()
+    }
   })
 })
 

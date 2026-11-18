@@ -4,7 +4,7 @@
  *
  * @module
  */
-import { toLevel } from '../levels.ts'
+import { toLevel } from '@strutvane/framework/log'
 
 /** A parsed log record as the viewer sees it. Unknown keys are kept. */
 export interface ViewerRecord {

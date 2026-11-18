@@ -1,9 +1,8 @@
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { compareLogFiles } from '../src/files.ts'
-import { parseLogLine } from '../src/format/parse.ts'
-import type { Batch, FileWriter, FileWriterFactory, Transport } from '../src/transports/types.ts'
+import type { Batch, FileWriter, FileWriterFactory, Transport } from '@strutvane/framework/log'
+import { compareLogFiles, parseLogLine } from '@strutvane/framework/log'
 
 /** A fresh temp directory and its cleanup function. */
 export function tempDir(prefix = 'sv-logs-'): { dir: string; cleanup: () => void } {

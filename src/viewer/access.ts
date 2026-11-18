@@ -5,9 +5,12 @@
  * Decision order:
  *
  * 1. **IP allow-list** (optional, all modes): a client outside it gets a 404.
- * 2. **`authorize(request)`** (if provided) is the only rule. `true` allows; `false` or a thrown
- *    error hides the viewer (404). Use it to plug in your own auth (e.g. "admins only").
- * 3. **Local development** (`APP_ENV=local`): allowed, so `pnpm dev` just works, but only when the
+ * 2. **`authorize(request, { actor, ip })`** (if provided) is the only rule: the gate the app
+ *    grants. Only a literal `true` allows; `false`, anything else or a thrown error hides the
+ *    viewer (404). Inside a Strutvane app `actor` is the signed-in user that `@strutvane/auth` (or
+ *    any identity provider on the `http.onRequest` hook) resolved, so "admins only" is
+ *    `({ actor }) => actor?.roles.includes('admin') === true`.
+ * 3. **Local development** (`APP_ENV=local`): allowed, so `npm run dev` just works, but only when the
  *    request is addressed to a loopback host (`localhost`, `127.0.0.1` or `[::1]`, any port) in
  *    both the `Host` header and the URL. A page on another site can make a browser send requests
  *    to a local server under its own host name (DNS rebinding); those carry a foreign `Host` and
@@ -15,8 +18,8 @@
  *    (`127.0.0.0/8`, `::1`, `::ffff:127.x.x.x`): a dev server bound to `0.0.0.0` must not open the
  *    viewer to another machine that simply sends `Host: localhost`. When the peer is unknown,
  *    only the host check applies, because some runtimes and adapters don't expose the socket
- *    peer; refusing there would break `pnpm dev` while the `Host` check still blocks rebinding.
- * 4. **Viewer token** (`LOGS_VIEWER_TOKEN`, at least 16 characters), in every mode, so a dev
+ *    peer; refusing there would break `npm run dev` while the `Host` check still blocks rebinding.
+ * 4. **Viewer token** (`LOG_VIEWER_TOKEN`, at least 16 characters), in every mode, so a dev
  *    server reached through Docker, WSL or a VM (a non-loopback peer) can still be opened: allowed with
  *    `Authorization: Bearer <token>` or a signed session cookie. Opening the page once with
  *    `?token=<token>` sets the cookie (HttpOnly, SameSite=Strict, 8 h) and redirects to a clean URL.
@@ -28,19 +31,44 @@
  */
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { BlockList, isIP } from 'node:net'
-import type { Env } from '../config.ts'
+import type { Actor } from '@strutvane/framework/contracts'
+import type { Env } from '@strutvane/framework/log'
 
 /** Minimum viewer token length. Shorter tokens are rejected (too easy to guess). */
 export const MIN_TOKEN_LENGTH = 16
 
 /** Session cookie name. */
-export const SESSION_COOKIE = 'sv_logs_session'
+export const SESSION_COOKIE = 'sv_log_viewer_session'
 
 /** How long a viewer session cookie stays valid. */
 export const SESSION_TTL_MS: number = 8 * 60 * 60 * 1000
 
-/** Your own access rule. Return `true` to allow the request. */
-export type AuthorizeFn = (request: Request) => boolean | Promise<boolean>
+/**
+ * What the app knows about the caller when the viewer asks for access.
+ *
+ * @example
+ * const context: ViewerAuthContext = { actor: null, ip: '127.0.0.1' }
+ */
+export interface ViewerAuthContext {
+  /**
+   * The signed-in actor, when the app's identity provider resolved one on `http.onRequest`
+   * (`@strutvane/auth`); `null` when nobody is signed in or no identity provider runs.
+   */
+  readonly actor: Actor | null
+  /** The socket peer address, when the server knows it (never a forwarded header). */
+  readonly ip?: string
+}
+
+/**
+ * Your own access rule: the gate the app grants. Return `true` (exactly) to allow the request.
+ *
+ * @example
+ * const adminsOnly: AuthorizeFn = (_request, { actor }) => actor?.roles.includes('admin') === true
+ */
+export type AuthorizeFn = (
+  request: Request,
+  context: ViewerAuthContext,
+) => boolean | Promise<boolean>
 
 /** The outcome of an access check. */
 export type AccessDecision =
@@ -159,7 +187,7 @@ export function validateToken(token: string | undefined, source: string): string
 }
 
 /** Read the viewer token from the environment. A short token is ignored, so the viewer stays closed. */
-export function tokenFromEnv(env: Env, name = 'LOGS_VIEWER_TOKEN'): string | undefined {
+export function tokenFromEnv(env: Env, name = 'LOG_VIEWER_TOKEN'): string | undefined {
   try {
     return validateToken(env[name]?.trim(), name)
   } catch {
@@ -168,7 +196,7 @@ export function tokenFromEnv(env: Env, name = 'LOGS_VIEWER_TOKEN'): string | und
 }
 
 function sign(token: string, expires: number): string {
-  return createHmac('sha256', token).update(`strutvane-logs-viewer:${expires}`).digest('base64url')
+  return createHmac('sha256', token).update(`strutvane-log-viewer:${expires}`).digest('base64url')
 }
 
 /** Create a session cookie value for `token`, valid until `expires` (epoch ms). */
@@ -221,12 +249,14 @@ export async function decideAccess(
   request: Request,
   ip: string | undefined,
   isPage: boolean,
+  actor: Actor | null = null,
 ): Promise<AccessDecision> {
   if (policy.allowList && !ipAllowed(policy.allowList, ip)) return { kind: 'hidden' }
 
   if (policy.authorize) {
     try {
-      return (await policy.authorize(request)) === true
+      return (await policy.authorize(request, { actor, ...(ip === undefined ? {} : { ip }) })) ===
+        true
         ? { kind: 'allow', mode: 'authorize' }
         : { kind: 'hidden' }
     } catch {

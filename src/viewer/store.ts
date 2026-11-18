@@ -22,33 +22,26 @@
  *
  * @module
  */
-import { createReadStream } from 'node:fs'
-import { stat } from 'node:fs/promises'
+import { open, stat } from 'node:fs/promises'
 import { join } from 'node:path'
-import { createInterface } from 'node:readline'
 import {
   compareLogFiles,
+  createSanitizer,
   DEFAULT_BASES,
+  describeFiles,
+  escapeLineSeparators,
+  type FileLine,
   isDayKey,
+  type LogFileInfo,
   type LogFileName,
   listLogFiles,
   parseLogFileName,
-  streamKey,
-} from '../files.ts'
-import { parseLogLine } from '../format/parse.ts'
-import {
-  describeFiles,
-  type FileLine,
-  type LogFileInfo,
+  parseLogLine,
   readLinesBackward,
   readRange,
-} from '../read.ts'
-
-export type { FileLine, LogFileInfo }
-export { describeFiles, readLinesBackward, readRange }
-
-import { createSanitizer, type Sanitizer } from '../redact.ts'
-import { escapeLineSeparators } from '../serialize.ts'
+  type Sanitizer,
+  streamKey,
+} from '@strutvane/framework/log'
 import {
   dayRange,
   matchesQuery,
@@ -56,6 +49,9 @@ import {
   type RecordQuery,
   type ViewerRecord,
 } from './filters.ts'
+
+export type { FileLine, LogFileInfo }
+export { describeFiles, readLinesBackward, readRange }
 
 /**
  * Where to continue paging. Records are read one group at a time, newest group first (each UTC
@@ -408,36 +404,172 @@ export async function readPage(options: PageOptions): Promise<Page> {
   return { records, scanned: budget.scanned }
 }
 
+/** Lines longer than this are skipped unread (far above any record the framework writes). */
+export const MAX_LINE_BYTES: number = 1024 * 1024
+
+/** Bytes read per chunk when reading forward. */
+const CHUNK_BYTES = 64 * 1024
+
 /**
- * Stream the complete lines of every file for `day`, oldest file first. Single files span days, so
- * only their lines whose timestamp falls on `day` are included.
+ * Read the complete lines of one file from the start, in bounded memory: at most one chunk plus
+ * one pending line (capped at `maxLineBytes`) is held at a time. A longer line is skipped without
+ * being buffered, and a last line without a newline is ignored (a writer may be mid-append). A
+ * file that vanishes or can't be read ends the generator quietly.
+ *
+ * @example
+ * for await (const line of readLinesForward('/srv/app/storage/logs/strutvane.log')) count++
+ */
+export async function* readLinesForward(
+  path: string,
+  maxLineBytes: number = MAX_LINE_BYTES,
+): AsyncGenerator<string> {
+  let handle: Awaited<ReturnType<typeof open>>
+  try {
+    handle = await open(path, 'r')
+  } catch {
+    return
+  }
+  try {
+    const buffer = Buffer.alloc(CHUNK_BYTES)
+    let parts: Buffer[] = []
+    let size = 0
+    let skipping = false
+    let position = 0
+    for (;;) {
+      let read: number
+      try {
+        read = (await handle.read(buffer, 0, CHUNK_BYTES, position)).bytesRead
+      } catch {
+        return
+      }
+      if (read === 0) return
+      position += read
+      let from = 0
+      for (;;) {
+        const nl = buffer.indexOf(10, from)
+        if (nl === -1 || nl >= read) break
+        const piece = buffer.subarray(from, nl)
+        if (!skipping && size + piece.length <= maxLineBytes) {
+          const line = Buffer.concat([...parts, piece]).toString('utf8')
+          const text = line.endsWith('\r') ? line.slice(0, -1) : line
+          if (text !== '') yield text
+        }
+        parts = []
+        size = 0
+        skipping = false
+        from = nl + 1
+      }
+      if (from < read && !skipping) {
+        const rest = buffer.subarray(from, read)
+        if (size + rest.length > maxLineBytes) {
+          // Too long to be a record: drop what was kept and skip to the next newline.
+          parts = []
+          size = 0
+          skipping = true
+        } else {
+          parts.push(Buffer.from(rest))
+          size += rest.length
+        }
+      }
+    }
+  } finally {
+    await handle.close().catch(() => undefined)
+  }
+}
+
+/** One writer stream of a day, read forward, with its next line ready for the merge. */
+interface ForwardStream {
+  readonly dir: string
+  /** The stream's files for the day, oldest first. */
+  readonly files: readonly string[]
+  /** Single files span days: only lines stamped with this day are kept. */
+  readonly filterDay: string | undefined
+  index: number
+  lines: AsyncGenerator<string> | undefined
+  head: { readonly text: string; readonly time: string; readonly file: string } | undefined
+}
+
+/** Advance a stream to its next line (of the day). */
+async function advance(s: ForwardStream, maxLineBytes: number): Promise<void> {
+  s.head = undefined
+  for (;;) {
+    const file = s.files[s.index]
+    if (file === undefined) return
+    s.lines ??= readLinesForward(join(s.dir, file), maxLineBytes)
+    const next = await s.lines.next()
+    if (next.done) {
+      s.lines = undefined
+      s.index++
+      continue
+    }
+    const time = parseLogLine(next.value)?.time
+    const stamp = typeof time === 'string' ? time : ''
+    if (s.filterDay !== undefined && !stamp.startsWith(s.filterDay)) continue
+    s.head = { text: next.value, time: stamp, file }
+    return
+  }
+}
+
+/** The stream whose next line is the oldest (ties: the earlier file in log order). */
+function oldest(streams: readonly ForwardStream[]): ForwardStream | undefined {
+  let best: ForwardStream | undefined
+  for (const s of streams) {
+    if (!s.head) continue
+    if (
+      !best?.head ||
+      s.head.time < best.head.time ||
+      (s.head.time === best.head.time && compareLogFiles(s.head.file, best.head.file) < 0)
+    )
+      best = s
+  }
+  return best
+}
+
+/**
+ * Stream the complete lines of every file for `day`, **oldest first and merged across writer
+ * streams by timestamp** (ADR-0022 §6): the main process and every worker write their own files,
+ * and a download shows their records interleaved in time order, not one process after another.
+ * Single files span days, so only their lines whose timestamp falls on `day` are included.
+ *
+ * Memory stays bounded however large the files are: one open file and one pending line per
+ * stream, each line capped at `maxLineBytes`.
+ *
+ * @example
+ * for await (const line of readDayLines(dir, '2026-11-15')) out.write(`${line}\n`)
  */
 export async function* readDayLines(
   dir: string,
   day: string,
   bases: ReadonlySet<string> = DEFAULT_BASES,
+  maxLineBytes: number = MAX_LINE_BYTES,
 ): AsyncGenerator<string> {
+  const byStream = new Map<string, { readonly files: string[]; readonly single: boolean }>()
   for (const name of await listLogFiles(dir, bases)) {
     const parsed = parseLogFileName(name)
     if (!parsed || (parsed.day !== undefined && parsed.day !== day)) continue
-    const stream = createReadStream(join(dir, name), { encoding: 'utf8' })
-    const lines = createInterface({ input: stream, crlfDelay: Number.POSITIVE_INFINITY })
-    try {
-      for await (const line of lines) {
-        if (!line) continue
-        if (parsed.day === undefined && !onDay(line, day)) continue
-        yield line
-      }
-    } catch {
-      // Deleted while reading: move on.
-    } finally {
-      lines.close()
-      stream.destroy()
-    }
+    const key = streamKey(parsed)
+    const entry = byStream.get(key) ?? { files: [], single: parsed.day === undefined }
+    entry.files.push(name) // listed oldest first (compareLogFiles order)
+    byStream.set(key, entry)
   }
-}
-
-function onDay(line: string, day: string): boolean {
-  const time = parseLogLine(line)?.time
-  return typeof time === 'string' && time.startsWith(day)
+  const streams: ForwardStream[] = [...byStream.values()].map((entry) => ({
+    dir,
+    files: entry.files,
+    filterDay: entry.single ? day : undefined,
+    index: 0,
+    lines: undefined,
+    head: undefined,
+  }))
+  try {
+    for (const s of streams) await advance(s, maxLineBytes)
+    for (;;) {
+      const best = oldest(streams)
+      if (!best?.head) return
+      const text = best.head.text
+      await advance(best, maxLineBytes)
+      yield text
+    }
+  } finally {
+    for (const s of streams) await s.lines?.return(undefined)
+  }
 }
