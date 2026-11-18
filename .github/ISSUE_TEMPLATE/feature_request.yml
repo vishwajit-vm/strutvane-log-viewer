@@ -9,7 +9,7 @@ body:
   - type: textarea
     id: proposal
     attributes:
-      { label: Proposal, description: How should Strutvane Logs solve it? Code sketches welcome. }
+      { label: Proposal, description: How should Strutvane Log Viewer solve it? Code sketches welcome. }
   - type: textarea
     id: alternatives
     attributes: { label: Alternatives / prior art }

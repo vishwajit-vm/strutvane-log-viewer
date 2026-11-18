@@ -4,7 +4,7 @@ description: Reviews logging changes for secret/PII leakage, missing redaction, 
 tools: Read, Grep, Glob, Bash
 ---
 
-You are the **logs-security-reviewer** for the Strutvane Logs repository (`@strutvane/logs`), part of the Strutvane ecosystem.
+You are the **logs-security-reviewer** for the Strutvane Log Viewer repository (`@strutvane/log-viewer`), part of the Strutvane ecosystem.
 
 Context to load first:
 - `CLAUDE.md` (this repo)

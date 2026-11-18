@@ -1,8 +1,8 @@
 <div align="center">
 
-# Strutvane Logs
+# Strutvane Log Viewer
 
-**Laravel-style logging for TypeScript apps: channels from `.env` (single, daily, stack, stderr, slack…), non-blocking writes, rotation and retention, secret redaction, request logging, and a built-in, locked-down log viewer at /_strutvane/logs. Installed by default in Strutvane apps.**
+**Browse, search, tail and download your app's logs at `/_strutvane/logs`. One command to install, closed by default, and it reads the files Strutvane's built-in logging writes.**
 
 [![Status: pre-release](https://img.shields.io/badge/status-pre--release-orange)](https://github.com/vishwajit-vm/strutvane/blob/main/docs/14-roadmap.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -12,296 +12,184 @@
 </div>
 
 > [!NOTE]
-> **Pre-release.** The package is implemented and tested, but not released to npm yet. APIs may still change before 1.0. The spec is [RFC-0004](https://github.com/vishwajit-vm/strutvane/blob/main/docs/rfcs/0004-logs-package.md), refined by [ADR-0022](https://github.com/vishwajit-vm/strutvane/blob/main/docs/adr/0022-laravel-style-log-channels.md) (Laravel-style channels). After Phase 0 the pipeline moves into `@strutvane/framework` and the viewer becomes `@strutvane/log-viewer`.
+> **Pre-release (`0.2.0-next.0`).** Implemented and tested, not on npm yet: it waits for `@strutvane/framework` 0.2. This package used to be `@strutvane/logs`. Since [ADR-0022](https://github.com/vishwajit-vm/strutvane/blob/main/docs/adr/0022-laravel-style-log-channels.md) logging itself is part of the framework (`@strutvane/framework/log`), and this package is only the viewer. See [Migrating from `@strutvane/logs`](#migrating-from-strutvanelogs).
 
 ## What it is
 
-Strutvane Logs is part of **[Strutvane](https://github.com/vishwajit-vm/strutvane)**, a TypeScript framework and package ecosystem for enterprise B2B apps. It works in **any Node 24+ app** (plain `node:http`, Express, Hono, anything that speaks `Request`/`Response`), and it is installed **by default** in Strutvane apps. Logging works **like Laravel's** ([ADR-0022](https://github.com/vishwajit-vm/strutvane/blob/main/docs/adr/0022-laravel-style-log-channels.md)): channels in `config/logging`, settings in `.env`, files in `storage/logs`.
+Laravel developers know [opcodesio/log-viewer](https://github.com/opcodesio/log-viewer): open a page, find the error. This is that page for **[Strutvane](https://github.com/vishwajit-vm/strutvane)** apps.
 
-- **Zero configuration.** `Log.info('Invoice sent', { invoiceId })` just works. Request context (request id, trace id, tenant, user) is added automatically.
-- **Channels, like Laravel.** `single`, `daily`, `stack`, `stderr`, `stdout`, `slack`, `null` and `custom`, plus any channel you name (`Log.channel('payments')`).
-- **Never slows or crashes your app.** Log calls are synchronous, cheap and never throw. Writing happens off the hot path in batches, per channel. If a channel fails, it falls back to stderr (with exactly one warning) and recovers by itself; the other channels never notice.
-- **Secrets never reach the disk, or Slack.** Passwords, passphrases, tokens, cookies, sessions, authorization headers, API keys, signatures, one-time and MFA codes, PINs, card data, JWTs, credentials in URLs, secret query parameters (`?token=`, `&sig=`, `#access_token=`), well-known prefixed keys (`sk_live_…`, `ghp_…`, `AKIA…`, `xoxb-…`), private keys and card numbers (in text or stored as numbers) are redacted once, before any channel sees the record. No channel option can turn redaction off. Add your own keys with `sanitize.extraKeys`, or at runtime with `registerSensitiveKeys(['taxNumber'])`.
-- **Readable, safe files.** One record per line, always: newlines and ANSI codes are escaped. Daily or single files, a size cap per file, retention by days, one file per process when several processes log, and a guaranteed flush on shutdown.
-- **Request logging** and a **built-in viewer** at `/_strutvane/logs` (closed by default), plus the `log:tail`, `log:list` and `log:clear` commands.
+Logging is built into the framework, Laravel style: channels in `config/logging.ts`, settings in `.env`, files in `storage/logs/`. This package reads those files.
 
-## Quick start
+- **Every file, one timeline.** Both formats (`line` and `json`, even mixed after a `LOG_FORMAT` change), every rotation part (`…-2.log`), and every process: the web process, queue workers and cluster workers each write their own file (`…worker-2.log`). The viewer merges them by timestamp, so one incident reads in the order it happened.
+- **Search that scales.** Filter by level, channel, text, time range, request id, route, status or tenant. Newest first, paged with an exact cursor. Files are read in fixed-size chunks, never whole, so a 10 GB log costs no more memory than a 10 KB one.
+- **Live tail** of new records, and **downloads** of a day as NDJSON or CSV (formula-safe for Excel).
+- **Closed by default.** Open on `localhost` while `APP_ENV=local`. Anywhere else, only for the users your gate allows, or with a token. Everyone else gets a 404, as if the page didn't exist.
+- **Two ways to show it:** the built-in page at `/_strutvane/logs` (no build step), or the `<LogViewer>` React screen inside your own admin.
+
+## Install
 
 ```bash
-pnpm add @strutvane/logs
+node strut add log-viewer
 ```
 
+That's it. The installer, in one transaction (preview it with `--dry-run --diff`):
+
+| File | Change |
+|---|---|
+| `config/log-viewer.ts` | Created: the viewer's settings (kept if you already have one) |
+| `config/index.ts` | Lists it as `logViewer` |
+| `.env`, `.env.example` | `LOG_VIEWER_ENABLED=true`, `LOG_VIEWER_TOKEN=` (empty: token access off) |
+| `bootstrap/providers.ts` | Registers `@strutvane/log-viewer/provider` |
+
+Run `node strut dev` and open <http://localhost:3000/_strutvane/logs>. `node strut remove log-viewer` reverses every edit (your `config/log-viewer.ts` is kept).
+
+If a file doesn't look like the one the skeleton ships, the installer leaves it alone and prints the one line to add yourself.
+
+## Who can open it
+
+| Situation | Access |
+|---|---|
+| `APP_ENV=local`, browser on the same machine | **Open**, for requests to `localhost`, `127.0.0.1` or `[::1]` from a loopback address. Any other `Host` header gets a 404 (this blocks DNS-rebinding pages), and so does another machine on the network |
+| Your gate (see below) | **Only your rule decides**: `true` opens it, anything else is a 404 |
+| `LOG_VIEWER_TOKEN` set (16+ characters) | `Authorization: Bearer <token>`, or open `/_strutvane/logs?token=<token>` once in a browser (an 8-hour, HttpOnly, SameSite=Strict cookie, then a clean URL). Also works in local mode from Docker, WSL or a VM |
+| Anything else (production with nothing set) | **404** |
+
+### The gate
+
+Like Laravel's `Gate::define('viewLogViewer', …)`, decide in your service provider who may open it. The gate receives the signed-in user that `@strutvane/auth` resolved:
+
 ```ts
-import { Log, logger, report } from '@strutvane/logs'
+// app/providers/app.provider.ts
+import { type Application, ServiceProvider } from '@strutvane/framework'
+import { LogViewerGateToken } from '@strutvane/log-viewer/provider'
 
-Log.info('Invoice sent', { invoiceId: 'inv_42', amount: 120 })
-Log.channel('payments').warning('Card declined', { orderId: 123 })
-Log.stack(['daily', 'slack']).critical('Ledger out of balance')
-Log.withContext({ orderId: 123 })          // every record in this request
-Log.shareContext({ release: '2026.11.15' }) // every record, every channel
-
-try {
-  await charge()
-} catch (error) {
-  report(error, { orderId: 123 })           // error level, stack and cause chain kept
+export class AppServiceProvider extends ServiceProvider {
+  override register(app: Application): void {
+    app.container.value(LogViewerGateToken, {
+      authorize: (_request, { actor }) => actor?.roles.includes('admin') === true,
+      // Optional: only one tenant's records for tenant admins.
+      scopeRecords: () => undefined,
+      // Optional: write downloads and clears to your audit log.
+      onAudit: (event) => audit.write(event),
+    })
+  }
 }
-logger('Cache warmed')                       // debug on the default channel
 ```
 
-With no configuration, records go to the `stack` channel, which writes the `daily` file `storage/logs/strutvane-2026-11-15.log`:
+Only a literal `true` opens the viewer; a gate that throws is a 404 (fail closed). A scoped viewer (`scopeRecords` returns a filter) sees only matching records, sees which days exist but not file names or sizes, and can't clear logs.
 
-```
-[2026-11-15 10:22:01.123] local.ERROR: Payment failed {"invoice":42,"requestId":"9f1c…"}
-```
-
-`LOG_FORMAT=json` writes one JSON object per line instead (for log shippers):
-
-```json
-{"time":"2026-11-15T10:22:01.123Z","level":"error","msg":"Payment failed","requestId":"9f1c…","fields":{"invoice":42}}
-```
-
-### Levels
-
-The eight RFC 5424 levels, as in Laravel, from least to most severe: `debug`, `info`, `notice`, `warning`, `error`, `critical`, `alert`, `emergency`. Every level has a method, plus `Log.log(level, …)`.
-
-The v1 names keep working as aliases: `trace` → `debug`, `warn` → `warning`, `fatal` → `critical` (`Log.warn()` writes a `warning` record). When a channel's queue is full, `debug`, `info` and `notice` records are dropped before `warning` and above, and the drop count is logged later.
-
-## Channels
+### Settings: `config/log-viewer.ts`
 
 ```ts
-// config/logging.ts
-import { defineLoggingConfig } from '@strutvane/logs'
+import { defineConfig } from '@strutvane/framework'
 
-export default defineLoggingConfig({
-  default: 'stack', // or LOG_CHANNEL
-  channels: {
-    payments: { driver: 'daily', name: 'payments', days: 90, level: 'info' },
-    audit: { driver: 'stack', channels: ['daily', 'payments'] },
-    shipper: { driver: 'custom', via: ({ format }) => myShipperTransport(format) },
-  },
+export default defineConfig((env) => ({
+  enabled: env.boolean('LOG_VIEWER_ENABLED', true),
+  path: '/_strutvane/logs',
+  token: env.optional('LOG_VIEWER_TOKEN'),
+  ipAllowList: [] as string[], // e.g. ['10.0.0.0/8']; checked against the socket peer, never a forwarded header
+}))
+```
+
+Functions (the gate) live in code, not in this file, because `node strut config:cache` stores config as JSON. A wrong setting (a short token, an odd path, a bad IP range) stops the boot with a message naming it: a typo must never open the viewer by accident.
+
+## Using it
+
+The page has filters for **levels** (debug is off by default), **channel**, **search** text, **route**, **status** (`404` or `5xx`), **request id** and a **time range**; **Load older records** pages back; **Live tail** streams new records in; the **Files** list downloads a day as NDJSON or CSV; **Clear old logs** deletes files before today after you type `DELETE` (today's files and every process's newest file are never deleted).
+
+Channels are the file channels of your `config/logging.ts` that write into `storage/logs` (`daily`, `single`, and any you add, such as `payments`).
+
+### In your own React admin
+
+```tsx
+import { LogViewer } from '@strutvane/log-viewer/react'
+
+export default function LogsPage() {
+  return <LogViewer pageSize={100} />
+}
+```
+
+`<LogViewer>` talks to the same API, so the same access rules apply. It has no look of its own: style the `lv-*` classes (or `[data-log-viewer]`) from your design. Log text is only ever rendered as text, so a log line can't become markup. Props: `basePath`, `pageSize` (at most 500), `maxRows` (records kept on screen, default 2,000), `title`, and `client` / `openTail` for tests.
+
+`createLogViewerClient()` is the same API as a small, browser-safe client, for any other front end.
+
+## The read API
+
+Under the viewer path (default `/_strutvane/logs`). Errors are RFC 9457 problems (`application/problem+json`) with a stable lowercase `code`.
+
+| Method | Path | What |
+|---|---|---|
+| GET | `/api/files` | Files, newest first, and `channels` |
+| GET | `/api/records` | Records, newest first. `limit` (1–500, default 100), `cursor`, and the filters |
+| GET | `/api/download?day=YYYY-MM-DD&format=ndjson\|csv` | One day, oldest first, every process merged |
+| GET | `/api/tail` | Live tail (Server-Sent Events) |
+| GET | `/api/session` | The CSRF token for `clear` |
+| POST | `/api/clear` | `{"confirm":"DELETE","before":"YYYY-MM-DD"}` |
+
+Filters (all optional): `level` (comma-separated; `warn`, `fatal` and `trace` are accepted aliases), `channel`, `q`, `from`, `to` (ISO 8601), `route`, `status`, `requestId`, `traceId`, `tenantId`. An invalid filter is a 400 `invalid_query`, never silently ignored.
+
+Codes: `invalid_query`, `invalid_body`, `unauthenticated`, `forbidden`, `method_not_allowed`, `payload_too_large`, `unsupported_media_type`, `rate_limited` (too many live tails), `internal_error`. A viewer you may not open answers a plain 404.
+
+## Outside a Strutvane app
+
+The viewer is a plain Web handler, for anything that speaks `Request`/`Response`:
+
+```ts
+import { createViewerHandler } from '@strutvane/log-viewer'
+
+const viewer = createViewerHandler({
+  dir: '/srv/app/storage/logs',
+  authorize: (request) => isAdmin(request),
 })
+
+// in your server:
+if (viewer.matches(request)) return viewer.fetch(request, { ip: socketAddress })
 ```
 
-| Driver | Writes | Options |
-|---|---|---|
-| `single` | `storage/logs/strutvane.log` | `path`, `name`, `level`, `format`, `maxFileSize` |
-| `daily` | `storage/logs/strutvane-YYYY-MM-DD.log`, kept for `days` | same, plus `days` |
-| `stack` | every record to each of its `channels` (once each, even if stacks overlap) | `channels` |
-| `stderr` / `stdout` | the stream, for containers | `level`, `format` |
-| `slack` | `critical` and above to `LOG_SLACK_WEBHOOK_URL`; at most one message per 10 s, the rest counted | `url`, `level`, `username`, `emoji`, `minIntervalMs` |
-| `null` | nothing | |
-| `custom` | your transport: `via: (context) => transport` | `via`, `level`, `format` |
+### Request logging adapters (deprecated)
 
-The built-in channels are `stack`, `single`, `daily`, `slack`, `stderr`, `stdout` and `null`; a channel with the same name replaces one. A stack that contains itself, directly or through other stacks, is refused with an error that shows the loop.
-
-With `createLogManager({ config })` the channel names are **typed**: `Log.channel('paymnets')` doesn't compile.
-
-**Mistakes.** A mistake in the config file throws a `LoggingConfigError` at startup that lists every problem with a hint. A mistake in `.env` never crashes the app: the default is used and a friendly warning is logged once (`LOG_LEVEL="loud" is not valid (use one of debug, info, …); using info`). An unknown channel name at runtime writes to the default channel and logs which channels exist.
-
-### `.env` reference
-
-| Key | Default | Meaning |
-|---|---|---|
-| `LOG_CHANNEL` | `stack` | The default channel |
-| `LOG_STACK` | `daily` | The channels of the built-in `stack`, comma-separated (e.g. `daily,slack`) |
-| `LOG_LEVEL` | `debug` when `APP_ENV=local`, else `info` | Minimum level for every channel without its own (Slack: `critical`) |
-| `LOG_DAILY_DAYS` | `14` | Days a `daily` channel keeps, today included (`0` keeps everything) |
-| `LOG_FORMAT` | `line` | `line` (readable) or `json` (one JSON object per line) |
-| `LOG_MAX_FILE_SIZE` | `100mb` | Size of one file before the next part starts (`-2`, `-3`, …) |
-| `LOG_PATH` | `storage/logs` | Log directory, relative to the project root |
-| `LOG_SLACK_WEBHOOK_URL` | — | The `slack` channel's webhook (https only) |
-| `LOG_DEPRECATIONS_CHANNEL` | `null` | Where `Log.deprecation()` writes |
-| `LOGS_VIEWER_TOKEN` | — | Opens the viewer for token holders (16+ characters) |
-
-The production Dockerfile sets `LOG_CHANNEL=stderr` and `LOG_FORMAT=json`. Additional processes get their own files automatically (cluster workers, worker threads); a process manager can set `LOG_WORKER_ID` for queue workers and schedulers.
-
-### Coming from Laravel
-
-| Laravel | Strutvane |
-|---|---|
-| `config/logging.php` | `config/logging.ts` (`defineLoggingConfig`) |
-| `Log::info()`, `Log::warning()` … | `Log.info()`, `Log.warning()` … |
-| `Log::channel('slack')` | `Log.channel('slack')` |
-| `Log::stack(['daily', 'slack'])` | `Log.stack(['daily', 'slack'])` |
-| `Log::build([...])` | `Log.build({ driver: 'single', path: 'storage/logs/imports' })` |
-| `Log::withContext()`, `Log::withoutContext()` | `Log.withContext()`, `Log.withoutContext()` |
-| `Log::shareContext()` | `Log.shareContext()` |
-| `logger()`, `report()` | `logger()`, `report()` |
-| `LOG_CHANNEL`, `LOG_STACK`, `LOG_LEVEL`, `LOG_DAILY_DAYS`, `LOG_SLACK_WEBHOOK_URL`, `LOG_DEPRECATIONS_CHANNEL` | the same keys |
-| `storage/logs/laravel.log`, `laravel-2026-11-15.log` | `storage/logs/strutvane.log`, `strutvane-2026-11-15.log` |
-| `tap`, `processors`, Monolog handlers | `custom` channels (`via`) |
-| one shared file for every process | one file per process (`…worker-2.log`): a size cap can't break, lines never tear |
-
-### Files
-
-```
-strutvane.log                         single
-strutvane-2.log                       single, second size part (files are never renamed)
-strutvane-2026-11-15.log              daily
-strutvane-2026-11-15-2.log            daily, second size part
-strutvane-2026-11-15.worker-2.log     an additional process (queue worker, cluster worker 2…)
-payments-2026-11-15.log               a channel with name: 'payments'
-```
-
-Files are ordered with `compareLogFiles` (base, day, process, part number), never with a plain string sort, which would put `-10` before `-2`. Retention deletes whole days and never the day being written. `log:clear` and the viewer never delete the newest file of a process (it may still be written), nor any file whose base name no channel uses.
-
-## Commands
-
-`@strutvane/logs/commands` exports `log:tail`, `log:list` and `log:clear` for the `node strut` command registry (pure functions plus a thin adapter: `command.run(argv, { stdout, stderr, config })`).
-
-```bash
-node strut log:tail [--level=warning] [--channel=payments] [--grep=text] [--since=15m] [-n 50] [--no-follow]
-node strut log:list [--channel=payments]
-node strut log:clear [--days=7] [--channel=payments] [--force]
-```
-
-- `log:tail` shows the last records, then new ones as they arrive until Ctrl+C (`--follow` is the default; `--no-follow` prints and exits). `--since` takes a duration (`30s`, `15m`, `2h`, `7d`) or a date or time. It reads both formats and merges the per-process files by timestamp. Output is re-redacted and printed in the `line` format, so a hostile log line can't drive your terminal.
-- `log:list` shows every file with its size and day, and totals per day.
-- `log:clear` deletes files, keeping the last `--days` days if given; files a running process may still write, and daily files dated today or later, are kept and listed. Deleting can't be undone, so it asks first in a terminal; without a terminal (CI, scripts, containers) it refuses unless you pass `--force`. The function behind it, `clearLogs(sources, { confirm: true, days })`, requires `confirm: true` for the same reason.
-
-## Migrating from v1 (`0.1.0-next.0`)
-
-| v1 | Now |
-|---|---|
-| `import { log } from '@strutvane/logs'` | `import { Log } from '@strutvane/logs'` (`log` still works: it is the same object) |
-| `createLogger({ driver, path, retentionDays, maxDailyBytes, writerTag, enabled })` | `createLogManager({ config, env, root, workerId })` with channels |
-| `setDefaultLogger(logger)` | `setLogManager(manager)` |
-| six levels `trace/debug/info/warn/error/fatal` | eight RFC 5424 levels; `trace`, `warn`, `fatal` are aliases |
-| `LOG_FORMAT=pretty` (console only) | `LOG_FORMAT=line`, files included (`pretty` reads as `line`, with a warning) |
-| `LOGS_PATH`, `LOGS_RETENTION_DAYS`, `LOGS_MAX_DAILY_SIZE` | `LOG_PATH`, `LOG_DAILY_DAYS`, `LOG_MAX_FILE_SIZE` (the old names are read once, with a rename warning) |
-| `LOGS_DRIVER=stdout`, `LOGS_ENABLED=false` | `LOG_CHANNEL=stdout`, `LOG_CHANNEL=null` (also read once, with a warning) |
-| files `2026-11-14.ndjson`, `2026-11-14.w3-1.ndjson` | `strutvane-2026-11-14.log`, `strutvane-2026-11-14.worker-3-2.log`; old files are not read or deleted, move or remove them by hand |
-| `config/logging.ts` keys `level`, `driver`, `format`, `retentionDays`, `maxDailySize`, `enabled` | `default`, `channels`, `deprecations`, `path` (plus `requests` and `viewer`, unchanged) |
-| `fileName`, `automaticWriterTag`, `prettyLine`, `prettyTransport`, `resolveLogsConfig` | `logFileName`, `automaticWorkerId`, the line format, `streamTransport`, `resolveLoggingConfig` |
-| viewer level filter `level=warn,fatal` | still accepted (aliases), records show `warning`, `critical` |
-
-## Request logging and the viewer
-
-Pick the adapter for your server. `logs()` adds request logging **and** the viewer in one line.
-
-**Hono**
+`@strutvane/log-viewer/http`, `/node`, `/hono` and `/express` still log one line per request and mount the viewer, for apps that don't run on the Strutvane HTTP kernel. **They are deprecated:** request logging belongs in `@strutvane/framework` and will move there; until then they work as before. Without a `logger` option they write through a log manager built from `.env` (`createLogManager` from `@strutvane/framework/log`).
 
 ```ts
 import { Hono } from 'hono'
-import { logs } from '@strutvane/logs/hono'
+import { logs } from '@strutvane/log-viewer/hono'
 
 const app = new Hono()
 app.use(logs())
 ```
 
-**Express 5**
-
-```ts
-import express from 'express'
-import { logs, errorLogging } from '@strutvane/logs/express'
-
-const app = express()
-app.use(logs())
-// … your routes …
-app.use(errorLogging()) // logs unhandled errors with their stack, then passes them on
-```
-
-**Plain `node:http`**
-
-```ts
-import { createServer } from 'node:http'
-import { toNodeHandler, withRequestLogging } from '@strutvane/logs/node'
-import { createViewerHandler } from '@strutvane/logs/viewer'
-
-const viewer = createViewerHandler()
-const serveViewer = toNodeHandler((request, info) => viewer.fetch(request, info))
-
-createServer(
-  withRequestLogging((req, res) => {
-    if (viewer.matchesPath(new URL(req.url ?? '/', 'http://x').pathname)) return void serveViewer(req, res)
-    res.end('hello')
-  }),
-).listen(3000)
-```
-
-**Any `fetch`-style server** (Bun, Deno, Next.js route handlers…)
-
-```ts
-import { createRequestLogger } from '@strutvane/logs/http'
-
-const requests = createRequestLogger()
-export default { fetch: (request: Request) => requests.handle(request, (r) => app.fetch(r)) }
-```
-
-Every request gets one line like `GET /invoices/:id 200` with `{ method, route, status, durationMs, size }`. Server errors log at `error`, slow requests (over 1 s) and aborted ones at `warning`, and `/health` and `/ready` are skipped. The request id comes from a safe incoming `x-request-id` header, or a new UUID, and is echoed back in the response.
-
-The viewer's record list reads both formats and merges every process's files by timestamp, newest first: the web process, queue workers and cluster workers each write their own file (`…worker-2.log`), and one incident reads in the order it happened. Paging is exact: a page continues where the last one stopped, per process, and records written meanwhile never slip into older pages.
-
-### Who can open the viewer
-
-| Situation | Access |
-|---|---|
-| `APP_ENV=local` | Open, so `pnpm dev` just works, for requests to `localhost`, `127.0.0.1` or `[::1]` only (any other `Host` gets a 404, which blocks DNS-rebinding pages). When the runtime exposes the client's socket address, it must be loopback too (`127.0.0.0/8`, `::1`, `::ffff:127.x.x.x`), so a dev server listening on `0.0.0.0` doesn't open the viewer to the network; when it doesn't, only the host is checked |
-| `LOGS_VIEWER_TOKEN` set (16+ characters) | `Authorization: Bearer <token>`, or open `/_strutvane/logs?token=<token>` once in a browser (sets an 8-hour, HttpOnly, SameSite=Strict cookie and redirects to a clean URL) |
-| You pass `authorize: (request) => boolean` | Only your rule decides (for example "admins only") |
-| Anything else (e.g. production with nothing set) | **404**, as if the viewer didn't exist |
-
-```ts
-logs({
-  viewer: {
-    authorize: async (request) => (await getUser(request))?.role === 'admin',
-    ipAllowList: ['10.0.0.0/8'],                       // optional, all modes
-    scopeRecords: (request) => {                        // optional tenant scoping
-      const tenant = tenantOf(request)
-      return tenant ? (record) => record.tenantId === tenant : undefined
-    },
-    onAudit: (event) => auditLog.write(event),          // clear and download events
-  },
-})
-```
-
-## Programmatic setup
-
-Outside a Strutvane app (or in tests), build the manager yourself. Options win over `.env`.
-
-```ts
-import { createLogManager, defineLoggingConfig, setLogManager } from '@strutvane/logs'
-
-const Log = createLogManager({
-  config: defineLoggingConfig({ channels: { payments: { driver: 'daily', name: 'payments' } } }),
-  root: '/srv/app',                                           // relative paths start here
-  sanitize: { extraKeys: ['iban'], extraPatterns: [/EMP-\d{6}/g] }, // added to the built-in rules
-  bindings: { service: 'billing-api' },
-  handleShutdown: true,                                       // drain on SIGTERM/SIGINT/beforeExit
-})
-setLogManager(Log) // optional: make the global `Log` use it
-```
-
 ## Package entry points
 
-| Import | What it gives you |
+| Import | What |
 |---|---|
-| `@strutvane/logs` | `Log`, `logger`, `report`, `createLogManager`, `defineLoggingConfig`, `runWithLogContext`, levels, formats, redaction, transports, file utilities |
-| `@strutvane/logs/http` | `createRequestLogger` for `Request`/`Response` handlers, plus the shared request-logging helpers |
-| `@strutvane/logs/node` | `withRequestLogging`, `toNodeHandler` (serve any Web handler from `node:http`) |
-| `@strutvane/logs/hono` | `requestLogging`, `logs` |
-| `@strutvane/logs/express` | `requestLogging`, `errorLogging`, `logs` |
-| `@strutvane/logs/viewer` | `createViewerHandler` and its building blocks |
-| `@strutvane/logs/provider` | The Strutvane app provider: binds `LoggerToken`, points `Log` at the app's channels, logs every request and serves the viewer through core hooks (`http.onRequest` / `http.onResponse`), configured by `config/logging.ts` |
-| `@strutvane/logs/commands` | `log:tail`, `log:list`, `log:clear` (adapters and the pure functions behind them) |
+| `@strutvane/log-viewer` | `createViewerHandler`, the read API (`readPage`, `readDayLines`, `readLinesForward`, `describeFiles`, cursors), filters, CSV and access helpers |
+| `@strutvane/log-viewer/react` | `<LogViewer>`, `createLogViewerClient` (browser-safe) |
+| `@strutvane/log-viewer/provider` | The app provider, `LogViewerGateToken`, `createLogViewerProvider` |
+| `@strutvane/log-viewer/installer` | The installer `node strut add log-viewer` runs |
+| `@strutvane/log-viewer/http`, `/node`, `/hono`, `/express` | Request-logging adapters (deprecated) |
 
-`hono` and `express` are optional peer dependencies: install only the one you use.
+`@strutvane/framework` is a required peer dependency (`^0.2.0-next.0`); `react`, `hono` and `express` are optional peers.
 
-In a Strutvane app `create-strutvane` registers `@strutvane/logs/provider` for you. It reads
-`config/logging.ts` (`default`, `channels`, `deprecations`, `path` relative to the project root,
-`requests.ignore`, `requests.slowThresholdMs`, `viewer.enabled/path/token`, and
-`viewer.authorize/ipAllowList/scopeRecords/onAudit`), and never imports the framework: request logging
-and the viewer ride on the framework's core hooks. `createLogsProvider({ viewer: { authorize } })`
-sets the same access rules in code (and wins over the config file). The IP allow-list is checked
-against the hook's `clientAddress` (the socket peer, never a forwarded header); without one it denies.
+## Migrating from `@strutvane/logs`
+
+| Before | Now |
+|---|---|
+| `import { Log, logger, report } from '@strutvane/logs'` and the rest of the logging API | `@strutvane/framework/log` (built in; nothing to install) |
+| `log:tail`, `log:list`, `log:clear` | Built into the framework's `node strut` |
+| `@strutvane/logs/viewer` | `@strutvane/log-viewer` (the root entry) |
+| `@strutvane/logs/provider` (`config/logging.ts` `viewer`, `requests`) | `@strutvane/log-viewer/provider`, settings in `config/log-viewer.ts`, the gate in `LogViewerGateToken`. It no longer binds the logger or logs requests |
+| `authorize(request)` | `authorize(request, { actor, ip })` |
+| `LOGS_VIEWER_TOKEN` | `LOG_VIEWER_TOKEN` |
+| `@strutvane/logs/http`, `/node`, `/hono`, `/express` | `@strutvane/log-viewer/…` (deprecated) |
 
 ## Security, in short
 
-- **Redaction before storage**, by key (at any depth) and by pattern, with tripwire tests proving every rule matters.
-- **Log injection is impossible**: every record is exactly one line (newlines and U+2028/U+2029 are escaped), and incoming request ids are validated.
-- **One line per record, in both formats**: the `line` format escapes newlines, every control character (ANSI codes included) and `U+2028/2029` in messages, and a space before `{`, so the context JSON always starts at the first ` {`. The parser is linear and reads both formats, even mixed in one directory.
-- **The Slack channel** only talks HTTPS, refuses private, loopback, link-local and cloud metadata addresses (also when DNS answers with one), connects to the address it checked, never follows redirects, times out, escapes Slack mentions, and sends at most one message per window.
-- **The viewer** renders log text with `textContent` only, sends a strict CSP with a per-response nonce, checks a CSRF token and `Origin` before clearing, never deletes today's files, validates every parameter (no path traversal), re-redacts records on the way out, limits concurrent live tails (a slot is freed however a tail ends, including clients that vanish without closing; tails accept GET only) and bounds the work per search (files are read backwards in fixed-size chunks, never whole). Scoped viewers see which days exist, not file names or sizes.
+- **Deny by default**, a 404 for anyone without access, and secrets compared in constant time.
+- **Log text is hostile**: the page renders it with `textContent` only under a strict CSP with a per-response nonce; the React screen renders it as text; CSV cells that could run as formulas are neutralised.
+- **No path traversal**: file names come from the directory listing and must match the framework's log file pattern; `day`, `channel` and `cursor` are validated.
+- **Records are re-redacted** on the way out, and searches match the redacted text, so a search can't guess a secret.
+- **Bounded work**: pages scan at most 100,000 lines, reads go in fixed-size chunks, lines over 1 MiB are skipped unread, at most 5 live tails run at once (a slot is freed however a tail ends).
+- **Clearing** needs the CSRF token, a same-origin request and `"confirm":"DELETE"`, and never deletes today's files.
 
 Report vulnerabilities privately: see [SECURITY.md](SECURITY.md).
 
@@ -309,24 +197,20 @@ Report vulnerabilities privately: see [SECURITY.md](SECURITY.md).
 
 | Package | Role |
 |---------|------|
-| [`@strutvane/framework`](https://github.com/vishwajit-vm/strutvane-framework) | Backend & database core |
-| [`@strutvane/auth`](https://github.com/vishwajit-vm/strutvane-auth) | Authentication, authorization, tenancy, audit |
-| [`@strutvane/ui`](https://github.com/vishwajit-vm/strutvane-ui) | Metadata-driven frontend |
-| [`@strutvane/core`](https://github.com/vishwajit-vm/strutvane-core) | Kernel: container, providers, config, context |
-| [`@strutvane/contracts`](https://github.com/vishwajit-vm/strutvane-contracts) | Shared types and wire protocols |
-| [`strutvane` / `@strutvane/cli`](https://github.com/vishwajit-vm/strutvane-cli) | Unified CLI |
-| [`@strutvane/devkit`](https://github.com/vishwajit-vm/strutvane-devkit) | SDK for installers, generators and plugins |
-| [`@strutvane/logs`](https://github.com/vishwajit-vm/strutvane-logs) | Zero-config logging + built-in log viewer (default) |
-| [`create-strutvane`](https://github.com/vishwajit-vm/create-strutvane) | Project starter |
+| [`@strutvane/framework`](https://github.com/vishwajit-vm/strutvane-framework) | The framework, including logging (`/log`) |
+| [`@strutvane/auth`](https://github.com/vishwajit-vm/strutvane-auth) | Sign-in, roles and teams: the actor your gate sees |
+| [`@strutvane/ui`](https://github.com/vishwajit-vm/strutvane-ui) | The React admin `<LogViewer>` fits into |
+| [`create-strutvane`](https://github.com/vishwajit-vm/create-strutvane) | Project starter (offers the log viewer, preselected) |
 
 ## Documentation
 
-- **Package specification:** [RFC-0004](https://github.com/vishwajit-vm/strutvane/blob/main/docs/rfcs/0004-logs-package.md), [ADR-0015](https://github.com/vishwajit-vm/strutvane/blob/main/docs/adr/0015-logs-own-pipeline-per-process-files.md) and [ADR-0022](https://github.com/vishwajit-vm/strutvane/blob/main/docs/adr/0022-laravel-style-log-channels.md)
-- **Ecosystem blueprint:** [strutvane/docs](https://github.com/vishwajit-vm/strutvane/tree/main/docs), starting with the [executive summary](https://github.com/vishwajit-vm/strutvane/blob/main/docs/00-executive-summary.md)
+- [ADR-0022](https://github.com/vishwajit-vm/strutvane/blob/main/docs/adr/0022-laravel-style-log-channels.md): logging in the framework, the viewer as its own package
+- [ADR-0015](https://github.com/vishwajit-vm/strutvane/blob/main/docs/adr/0015-logs-own-pipeline-per-process-files.md) and [RFC-0004](https://github.com/vishwajit-vm/strutvane/blob/main/docs/rfcs/0004-logs-package.md) (§6, the viewer)
+- The ecosystem blueprint: [strutvane/docs](https://github.com/vishwajit-vm/strutvane/tree/main/docs)
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). The quality gate is `corepack pnpm@12.18.0 run ci` (lint → typecheck → tests with coverage → build).
+See [CONTRIBUTING.md](CONTRIBUTING.md). npm only (npm 11.19+). The quality gate is `npm run ci` (lint → typecheck → tests with coverage → build).
 
 ## License
 

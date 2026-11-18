@@ -1,6 +1,6 @@
-# Contributing to Strutvane Logs
+# Contributing to Strutvane Log Viewer
 
-Thanks for your interest! Strutvane Logs is part of [Strutvane](https://github.com/vishwajit-vm/strutvane) and is currently in the **design phase**.
+Thanks for your interest! Strutvane Log Viewer is part of [Strutvane](https://github.com/vishwajit-vm/strutvane) and is in **pre-release**.
 
 ## Right now, the most useful contributions are
 - Design feedback on the [package spec](https://github.com/vishwajit-vm/strutvane/blob/main/docs/rfcs/0004-logs-package.md) and the [blueprint](https://github.com/vishwajit-vm/strutvane/tree/main/docs), via issues or discussions
@@ -14,9 +14,9 @@ Thanks for your interest! Strutvane Logs is part of [Strutvane](https://github.c
 - Sign off your commits (Developer Certificate of Origin): `git commit -s`.
 
 ## Development (once code exists)
-Requirements: Node 24+ and pnpm. Docker is optional and for local services only (never committed).
+Requirements: Node 24.3+ and npm 11.19+ (npm only; never pnpm or yarn). Docker is optional and for local services only (never committed).
 
 ```bash
-pnpm install
-pnpm lint && pnpm typecheck && pnpm test
+npm install
+npm run ci
 ```

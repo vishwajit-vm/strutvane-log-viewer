@@ -1,5 +1,5 @@
 ---
-description: Show the relevant Strutvane Logs spec section for a topic
+description: Show the relevant Strutvane Log Viewer spec section for a topic
 argument-hint: <topic>
 ---
 

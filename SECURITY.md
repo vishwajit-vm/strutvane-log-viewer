@@ -13,4 +13,4 @@ We aim to:
 
 ## Supported versions
 
-Strutvane Logs has not been released yet. Once 1.0 ships, the supported-versions table and LTS policy will be published here and in the [docs](https://github.com/vishwajit-vm/strutvane/blob/main/docs/10-repositories-publishing-versioning.md).
+Strutvane Log Viewer has not been released yet. Once 1.0 ships, the supported-versions table and LTS policy will be published here and in the [docs](https://github.com/vishwajit-vm/strutvane/blob/main/docs/10-repositories-publishing-versioning.md).
